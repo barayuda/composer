@@ -12,6 +12,7 @@
 
 namespace Composer\Test\Repository;
 
+use Composer\TestCase;
 use Symfony\Component\Process\ExecutableFinder;
 use Composer\Package\Dumper\ArrayDumper;
 use Composer\Repository\VcsRepository;
@@ -23,15 +24,17 @@ use Composer\Config;
 /**
  * @group slow
  */
-class VcsRepositoryTest extends \PHPUnit_Framework_TestCase
+class VcsRepositoryTest extends TestCase
 {
+    private static $composerHome;
     private static $gitRepo;
     private $skipped;
 
     protected function initialize()
     {
         $oldCwd = getcwd();
-        self::$gitRepo = sys_get_temp_dir() . '/composer-git-'.mt_rand().'/';
+        self::$composerHome = $this->getUniqueTmpDirectory();
+        self::$gitRepo = $this->getUniqueTmpDirectory();
 
         $locator = new ExecutableFinder();
         if (!$locator->find('git')) {
@@ -125,6 +128,7 @@ class VcsRepositoryTest extends \PHPUnit_Framework_TestCase
     public static function tearDownAfterClass()
     {
         $fs = new Filesystem;
+        $fs->removeDirectory(self::$composerHome);
         $fs->removeDirectory(self::$gitRepo);
     }
 
@@ -140,7 +144,13 @@ class VcsRepositoryTest extends \PHPUnit_Framework_TestCase
             'dev-master' => true,
         );
 
-        $repo = new VcsRepository(array('url' => self::$gitRepo, 'type' => 'vcs'), new NullIO, new Config());
+        $config = new Config();
+        $config->merge(array(
+            'config' => array(
+                'home' => self::$composerHome,
+            ),
+        ));
+        $repo = new VcsRepository(array('url' => self::$gitRepo, 'type' => 'vcs'), new NullIO, $config);
         $packages = $repo->getPackages();
         $dumper = new ArrayDumper();
 

@@ -15,9 +15,11 @@ namespace Composer\Downloader;
 /**
  * @author Jordi Boggiano <j.boggiano@seld.be>
  */
-class TransportException extends \Exception
+class TransportException extends \RuntimeException
 {
     protected $headers;
+    protected $response;
+    protected $statusCode;
 
     public function setHeaders($headers)
     {
@@ -27,5 +29,25 @@ class TransportException extends \Exception
     public function getHeaders()
     {
         return $this->headers;
+    }
+
+    public function setResponse($response)
+    {
+        $this->response = $response;
+    }
+
+    public function getResponse()
+    {
+        return $this->response;
+    }
+
+    public function setStatusCode($statusCode)
+    {
+        $this->statusCode = $statusCode;
+    }
+
+    public function getStatusCode()
+    {
+        return $this->statusCode;
     }
 }

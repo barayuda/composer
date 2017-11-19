@@ -12,10 +12,10 @@
 
 namespace Composer\Util;
 
+use Composer\Factory;
 use Composer\IO\IOInterface;
 use Composer\Config;
 use Composer\Downloader\TransportException;
-use Composer\Json\JsonFile;
 
 /**
  * @author Jordi Boggiano <j.boggiano@seld.be>
@@ -40,7 +40,7 @@ class GitHub
         $this->io = $io;
         $this->config = $config;
         $this->process = $process ?: new ProcessExecutor;
-        $this->remoteFilesystem = $remoteFilesystem ?: new RemoteFilesystem($io);
+        $this->remoteFilesystem = $remoteFilesystem ?: Factory::createRemoteFilesystem($this->io, $config);
     }
 
     /**
@@ -51,7 +51,7 @@ class GitHub
      */
     public function authorizeOAuth($originUrl)
     {
-        if ('github.com' !== $originUrl) {
+        if (!in_array($originUrl, $this->config->get('github-domains'))) {
             return false;
         }
 
@@ -76,56 +76,54 @@ class GitHub
      */
     public function authorizeOAuthInteractively($originUrl, $message = null)
     {
-        $attemptCounter = 0;
-
         if ($message) {
-            $this->io->write($message);
+            $this->io->writeError($message);
         }
-        $this->io->write('The credentials will be swapped for an OAuth token stored in '.$this->config->get('home').'/config.json, your password will not be stored');
-        $this->io->write('To revoke access to this token you can visit https://github.com/settings/applications');
-        while ($attemptCounter++ < 5) {
-            try {
-                $username = $this->io->ask('Username: ');
-                $password = $this->io->askAndHideAnswer('Password: ');
-                $this->io->setAuthentication($originUrl, $username, $password);
 
-                // build up OAuth app name
-                $appName = 'Composer';
-                if (0 === $this->process->execute('hostname', $output)) {
-                    $appName .= ' on ' . trim($output);
-                }
+        $note = 'Composer';
+        if ($this->config->get('github-expose-hostname') === true && 0 === $this->process->execute('hostname', $output)) {
+            $note .= ' on ' . trim($output);
+        }
+        $note .= ' ' . date('Y-m-d Hi');
 
-                $contents = JsonFile::parseJson($this->remoteFilesystem->getContents($originUrl, 'https://api.github.com/authorizations', false, array(
-                    'http' => array(
-                        'method' => 'POST',
-                        'follow_location' => false,
-                        'header' => "Content-Type: application/json\r\n",
-                        'content' => json_encode(array(
-                            'scopes' => array('repo'),
-                            'note' => $appName,
-                            'note_url' => 'https://getcomposer.org/',
-                        )),
-                    )
-                )));
-            } catch (TransportException $e) {
-                if (in_array($e->getCode(), array(403, 401))) {
-                    $this->io->write('Invalid credentials.');
-                    continue;
-                }
+        $url = 'https://'.$originUrl.'/settings/tokens/new?scopes=repo&description=' . str_replace('%20', '+', rawurlencode($note));
+        $this->io->writeError(sprintf('Head to %s', $url));
+        $this->io->writeError(sprintf('to retrieve a token. It will be stored in "%s" for future use by Composer.', $this->config->getAuthConfigSource()->getName()));
 
-                throw $e;
+        $token = trim($this->io->askAndHideAnswer('Token (hidden): '));
+
+        if (!$token) {
+            $this->io->writeError('<warning>No token given, aborting.</warning>');
+            $this->io->writeError('You can also add it manually later by using "composer config --global --auth github-oauth.github.com <token>"');
+
+            return false;
+        }
+
+        $this->io->setAuthentication($originUrl, $token, 'x-oauth-basic');
+
+        try {
+            $apiUrl = ('github.com' === $originUrl) ? 'api.github.com/' : $originUrl . '/api/v3/';
+
+            $this->remoteFilesystem->getContents($originUrl, 'https://'. $apiUrl, false, array(
+                'retry-auth-failure' => false,
+            ));
+        } catch (TransportException $e) {
+            if (in_array($e->getCode(), array(403, 401))) {
+                $this->io->writeError('<error>Invalid token provided.</error>');
+                $this->io->writeError('You can also add it manually later by using "composer config --global --auth github-oauth.github.com <token>"');
+
+                return false;
             }
 
-            $this->io->setAuthentication($originUrl, $contents['token'], 'x-oauth-basic');
-
-            // store value in user config
-            $githubTokens = $this->config->get('github-oauth') ?: array();
-            $githubTokens[$originUrl] = $contents['token'];
-            $this->config->getConfigSource()->addConfigSetting('github-oauth', $githubTokens);
-
-            return true;
+            throw $e;
         }
 
-        throw new \RuntimeException("Invalid GitHub credentials 5 times in a row, aborting.");
+        // store value in user config
+        $this->config->getConfigSource()->removeConfigSetting('github-oauth.'.$originUrl);
+        $this->config->getAuthConfigSource()->addConfigSetting('github-oauth.'.$originUrl, $token);
+
+        $this->io->writeError('<info>Token stored successfully.</info>');
+
+        return true;
     }
 }

@@ -19,7 +19,7 @@ use Composer\Package\PackageInterface;
  *
  * @author Beau Simensen <beau@dflydev.com>
  */
-class CompositeRepository implements RepositoryInterface
+class CompositeRepository extends BaseRepository
 {
     /**
      * List of repositories
@@ -67,11 +67,11 @@ class CompositeRepository implements RepositoryInterface
     /**
      * {@inheritdoc}
      */
-    public function findPackage($name, $version)
+    public function findPackage($name, $constraint)
     {
         foreach ($this->repositories as $repository) {
             /* @var $repository RepositoryInterface */
-            $package = $repository->findPackage($name, $version);
+            $package = $repository->findPackage($name, $constraint);
             if (null !== $package) {
                 return $package;
             }
@@ -83,43 +83,29 @@ class CompositeRepository implements RepositoryInterface
     /**
      * {@inheritdoc}
      */
-    public function findPackages($name, $version = null)
+    public function findPackages($name, $constraint = null)
     {
         $packages = array();
         foreach ($this->repositories as $repository) {
             /* @var $repository RepositoryInterface */
-            $packages[] = $repository->findPackages($name, $version);
+            $packages[] = $repository->findPackages($name, $constraint);
         }
 
-        return call_user_func_array('array_merge', $packages);
+        return $packages ? call_user_func_array('array_merge', $packages) : array();
     }
 
     /**
      * {@inheritdoc}
      */
-    public function search($query, $mode = 0)
+    public function search($query, $mode = 0, $type = null)
     {
         $matches = array();
         foreach ($this->repositories as $repository) {
             /* @var $repository RepositoryInterface */
-            $matches[] = $repository->search($query, $mode);
+            $matches[] = $repository->search($query, $mode, $type);
         }
 
-        return call_user_func_array('array_merge', $matches);
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    public function filterPackages($callback, $class = 'Composer\Package\Package')
-    {
-        foreach ($this->repositories as $repository) {
-            if (false === $repository->filterPackages($callback, $class)) {
-                return false;
-            }
-        }
-
-        return true;
+        return $matches ? call_user_func_array('array_merge', $matches) : array();
     }
 
     /**
@@ -133,7 +119,7 @@ class CompositeRepository implements RepositoryInterface
             $packages[] = $repository->getPackages();
         }
 
-        return call_user_func_array('array_merge', $packages);
+        return $packages ? call_user_func_array('array_merge', $packages) : array();
     }
 
     /**

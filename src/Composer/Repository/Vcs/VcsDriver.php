@@ -12,11 +12,15 @@
 
 namespace Composer\Repository\Vcs;
 
+use Composer\Cache;
 use Composer\Downloader\TransportException;
 use Composer\Config;
+use Composer\Factory;
 use Composer\IO\IOInterface;
+use Composer\Json\JsonFile;
 use Composer\Util\ProcessExecutor;
 use Composer\Util\RemoteFilesystem;
+use Composer\Util\Filesystem;
 
 /**
  * A driver implementation for driver with authentication interaction.
@@ -25,13 +29,24 @@ use Composer\Util\RemoteFilesystem;
  */
 abstract class VcsDriver implements VcsDriverInterface
 {
+    /** @var string */
     protected $url;
+    /** @var string */
     protected $originUrl;
+    /** @var array */
     protected $repoConfig;
+    /** @var IOInterface */
     protected $io;
+    /** @var Config */
     protected $config;
+    /** @var ProcessExecutor */
     protected $process;
+    /** @var RemoteFilesystem */
     protected $remoteFilesystem;
+    /** @var array */
+    protected $infoCache = array();
+    /** @var Cache */
+    protected $cache;
 
     /**
      * Constructor.
@@ -44,11 +59,8 @@ abstract class VcsDriver implements VcsDriverInterface
      */
     final public function __construct(array $repoConfig, IOInterface $io, Config $config, ProcessExecutor $process = null, RemoteFilesystem $remoteFilesystem = null)
     {
-
-        if (self::isLocalUrl($repoConfig['url'])) {
-            $repoConfig['url'] = realpath(
-                preg_replace('/^file:\/\//', '', $repoConfig['url'])
-            );
+        if (Filesystem::isLocalPath($repoConfig['url'])) {
+            $repoConfig['url'] = Filesystem::getPlatformPath($repoConfig['url']);
         }
 
         $this->url = $repoConfig['url'];
@@ -56,8 +68,58 @@ abstract class VcsDriver implements VcsDriverInterface
         $this->repoConfig = $repoConfig;
         $this->io = $io;
         $this->config = $config;
-        $this->process = $process ?: new ProcessExecutor;
-        $this->remoteFilesystem = $remoteFilesystem ?: new RemoteFilesystem($io);
+        $this->process = $process ?: new ProcessExecutor($io);
+        $this->remoteFilesystem = $remoteFilesystem ?: Factory::createRemoteFilesystem($this->io, $config);
+    }
+
+    /**
+     * Returns whether or not the given $identifier should be cached or not.
+     *
+     * @param  string $identifier
+     * @return bool
+     */
+    protected function shouldCache($identifier)
+    {
+        return $this->cache && preg_match('{[a-f0-9]{40}}i', $identifier);
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function getComposerInformation($identifier)
+    {
+        if (!isset($this->infoCache[$identifier])) {
+            if ($this->shouldCache($identifier) && $res = $this->cache->read($identifier)) {
+                return $this->infoCache[$identifier] = JsonFile::parseJson($res);
+            }
+
+            $composer = $this->getBaseComposerInformation($identifier);
+
+            if ($this->shouldCache($identifier)) {
+                $this->cache->write($identifier, json_encode($composer));
+            }
+
+            $this->infoCache[$identifier] = $composer;
+        }
+
+        return $this->infoCache[$identifier];
+    }
+
+    protected function getBaseComposerInformation($identifier)
+    {
+        $composerFileContent = $this->getFileContent('composer.json', $identifier);
+
+        if (!$composerFileContent) {
+            return null;
+        }
+
+        $composer = JsonFile::parseJson($composerFileContent, $identifier . ':composer.json');
+
+        if (empty($composer['time']) && $changeDate = $this->getChangeDate($identifier)) {
+            $composer['time'] = $changeDate->format(DATE_RFC3339);
+        }
+
+        return $composer;
     }
 
     /**
@@ -98,11 +160,16 @@ abstract class VcsDriver implements VcsDriverInterface
      */
     protected function getContents($url)
     {
-        return $this->remoteFilesystem->getContents($this->originUrl, $url, false);
+        $options = isset($this->repoConfig['options']) ? $this->repoConfig['options'] : array();
+
+        return $this->remoteFilesystem->getContents($this->originUrl, $url, false, $options);
     }
 
-    protected static function isLocalUrl($url)
+    /**
+     * {@inheritDoc}
+     */
+    public function cleanup()
     {
-        return (bool) preg_match('{^(file://|/|[a-z]:[\\\\/])}i', $url);
+        return;
     }
 }

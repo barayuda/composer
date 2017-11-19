@@ -12,11 +12,11 @@
 
 namespace Composer\Json;
 
-use Composer\Composer;
 use JsonSchema\Validator;
 use Seld\JsonLint\JsonParser;
 use Seld\JsonLint\ParsingException;
 use Composer\Util\RemoteFilesystem;
+use Composer\IO\IOInterface;
 use Composer\Downloader\TransportException;
 
 /**
@@ -36,15 +36,17 @@ class JsonFile
 
     private $path;
     private $rfs;
+    private $io;
 
     /**
      * Initializes json file reader/parser.
      *
      * @param  string                    $path path to a lockfile
      * @param  RemoteFilesystem          $rfs  required for loading http/https json files
+     * @param  IOInterface               $io
      * @throws \InvalidArgumentException
      */
-    public function __construct($path, RemoteFilesystem $rfs = null)
+    public function __construct($path, RemoteFilesystem $rfs = null, IOInterface $io = null)
     {
         $this->path = $path;
 
@@ -52,6 +54,7 @@ class JsonFile
             throw new \InvalidArgumentException('http urls require a RemoteFilesystem instance to be passed');
         }
         $this->rfs = $rfs;
+        $this->io = $io;
     }
 
     /**
@@ -84,6 +87,9 @@ class JsonFile
             if ($this->rfs) {
                 $json = $this->rfs->getContents($this->path, $this->path, false);
             } else {
+                if ($this->io && $this->io->isDebug()) {
+                    $this->io->writeError('Reading ' . $this->path);
+                }
                 $json = file_get_contents($this->path);
             }
         } catch (TransportException $e) {
@@ -98,9 +104,9 @@ class JsonFile
     /**
      * Writes json file.
      *
-     * @param  array                     $hash    writes hash into json file
-     * @param  int                       $options json_encode options (defaults to JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
-     * @throws \UnexpectedValueException
+     * @param  array                                $hash    writes hash into json file
+     * @param  int                                  $options json_encode options (defaults to JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
+     * @throws \UnexpectedValueException|\Exception
      */
     public function write(array $hash, $options = 448)
     {
@@ -117,15 +123,29 @@ class JsonFile
                 );
             }
         }
-        file_put_contents($this->path, static::encode($hash, $options). ($options & self::JSON_PRETTY_PRINT ? "\n" : ''));
+
+        $retries = 3;
+        while ($retries--) {
+            try {
+                file_put_contents($this->path, static::encode($hash, $options). ($options & self::JSON_PRETTY_PRINT ? "\n" : ''));
+                break;
+            } catch (\Exception $e) {
+                if ($retries) {
+                    usleep(500000);
+                    continue;
+                }
+
+                throw $e;
+            }
+        }
     }
 
     /**
      * Validates the schema of the current json file according to composer-schema.json rules
      *
      * @param  int                     $schema a JsonFile::*_SCHEMA constant
-     * @return bool                    true on success
      * @throws JsonValidationException
+     * @return bool                    true on success
      */
     public function validateSchema($schema = self::STRICT_SCHEMA)
     {
@@ -137,12 +157,17 @@ class JsonFile
         }
 
         $schemaFile = __DIR__ . '/../../../res/composer-schema.json';
-        $schemaData = json_decode(file_get_contents($schemaFile));
+
+        // Prepend with file:// only when not using a special schema already (e.g. in the phar)
+        if (false === strpos($schemaFile, '://')) {
+            $schemaFile = 'file://' . $schemaFile;
+        }
+
+        $schemaData = (object) array('$ref' => $schemaFile);
 
         if ($schema === self::LAX_SCHEMA) {
             $schemaData->additionalProperties = true;
-            $schemaData->properties->name->required = false;
-            $schemaData->properties->description->required = false;
+            $schemaData->required = array();
         }
 
         $validator = new Validator();
@@ -164,22 +189,31 @@ class JsonFile
     /**
      * Encodes an array into (optionally pretty-printed) JSON
      *
-     * This code is based on the function found at:
-     *  http://recursive-design.com/blog/2008/03/11/format-json-with-php/
-     *
-     * Originally licensed under MIT by Dave Perrett <mail@recursive-design.com>
-     *
      * @param  mixed  $data    Data to encode into a formatted JSON string
      * @param  int    $options json_encode options (defaults to JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
      * @return string Encoded json
      */
     public static function encode($data, $options = 448)
     {
-        if (version_compare(PHP_VERSION, '5.4', '>=')) {
-            return json_encode($data, $options);
+        if (PHP_VERSION_ID >= 50400) {
+            $json = json_encode($data, $options);
+            if (false === $json) {
+                self::throwEncodeError(json_last_error());
+            }
+
+            //  compact brackets to follow recent php versions
+            if (PHP_VERSION_ID < 50428 || (PHP_VERSION_ID >= 50500 && PHP_VERSION_ID < 50512) || (defined('JSON_C_VERSION') && version_compare(phpversion('json'), '1.3.6', '<'))) {
+                $json = preg_replace('/\[\s+\]/', '[]', $json);
+                $json = preg_replace('/\{\s+\}/', '{}', $json);
+            }
+
+            return $json;
         }
 
         $json = json_encode($data);
+        if (false === $json) {
+            self::throwEncodeError(json_last_error());
+        }
 
         $prettyPrint = (bool) ($options & self::JSON_PRETTY_PRINT);
         $unescapeUnicode = (bool) ($options & self::JSON_UNESCAPED_UNICODE);
@@ -189,83 +223,35 @@ class JsonFile
             return $json;
         }
 
-        $result = '';
-        $pos = 0;
-        $strLen = strlen($json);
-        $indentStr = '    ';
-        $newLine = "\n";
-        $outOfQuotes = true;
-        $buffer = '';
-        $noescape = true;
+        return JsonFormatter::format($json, $unescapeUnicode, $unescapeSlashes);
+    }
 
-        for ($i = 0; $i < $strLen; $i++) {
-            // Grab the next character in the string
-            $char = substr($json, $i, 1);
-
-            // Are we inside a quoted string?
-            if ('"' === $char && $noescape) {
-                $outOfQuotes = !$outOfQuotes;
-            }
-
-            if (!$outOfQuotes) {
-                $buffer .= $char;
-                $noescape = '\\' === $char ? !$noescape : true;
-                continue;
-            } elseif ('' !== $buffer) {
-                if ($unescapeSlashes) {
-                    $buffer = str_replace('\\/', '/', $buffer);
-                }
-
-                if ($unescapeUnicode && function_exists('mb_convert_encoding')) {
-                    // http://stackoverflow.com/questions/2934563/how-to-decode-unicode-escape-sequences-like-u00ed-to-proper-utf-8-encoded-cha
-                    $buffer = preg_replace_callback('/\\\\u([0-9a-f]{4})/i', function($match) {
-                        return mb_convert_encoding(pack('H*', $match[1]), 'UTF-8', 'UCS-2BE');
-                    }, $buffer);
-                }
-
-                $result .= $buffer.$char;
-                $buffer = '';
-                continue;
-            }
-
-            if (':' === $char) {
-                // Add a space after the : character
-                $char .= ' ';
-            } elseif (('}' === $char || ']' === $char)) {
-                $pos--;
-                $prevChar = substr($json, $i - 1, 1);
-
-                if ('{' !== $prevChar && '[' !== $prevChar) {
-                    // If this character is the end of an element,
-                    // output a new line and indent the next line
-                    $result .= $newLine;
-                    for ($j = 0; $j < $pos; $j++) {
-                        $result .= $indentStr;
-                    }
-                } else {
-                    // Collapse empty {} and []
-                    $result = rtrim($result)."\n\n".$indentStr;
-                }
-            }
-
-            $result .= $char;
-
-            // If the last character was the beginning of an element,
-            // output a new line and indent the next line
-            if (',' === $char || '{' === $char || '[' === $char) {
-                $result .= $newLine;
-
-                if ('{' === $char || '[' === $char) {
-                    $pos++;
-                }
-
-                for ($j = 0; $j < $pos; $j++) {
-                    $result .= $indentStr;
-                }
-            }
+    /**
+     * Throws an exception according to a given code with a customized message
+     *
+     * @param  int               $code return code of json_last_error function
+     * @throws \RuntimeException
+     */
+    private static function throwEncodeError($code)
+    {
+        switch ($code) {
+            case JSON_ERROR_DEPTH:
+                $msg = 'Maximum stack depth exceeded';
+                break;
+            case JSON_ERROR_STATE_MISMATCH:
+                $msg = 'Underflow or the modes mismatch';
+                break;
+            case JSON_ERROR_CTRL_CHAR:
+                $msg = 'Unexpected control character found';
+                break;
+            case JSON_ERROR_UTF8:
+                $msg = 'Malformed UTF-8 characters, possibly incorrectly encoded';
+                break;
+            default:
+                $msg = 'Unknown error';
         }
 
-        return $result;
+        throw new \RuntimeException('JSON encoding failed: '.$msg);
     }
 
     /**
@@ -278,6 +264,9 @@ class JsonFile
      */
     public static function parseJson($json, $file = null)
     {
+        if (null === $json) {
+            return;
+        }
         $data = json_decode($json, true);
         if (null === $data && JSON_ERROR_NONE !== json_last_error()) {
             self::validateSyntax($json, $file);
@@ -291,10 +280,10 @@ class JsonFile
      *
      * @param  string                    $json
      * @param  string                    $file
-     * @return bool                      true on success
      * @throws \UnexpectedValueException
      * @throws JsonValidationException
      * @throws ParsingException
+     * @return bool                      true on success
      */
     protected static function validateSyntax($json, $file = null)
     {

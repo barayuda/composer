@@ -116,11 +116,25 @@ interface PackageInterface
     public function getSourceUrl();
 
     /**
+     * Returns the repository urls of this package including mirrors, e.g. git://github.com/naderman/composer.git
+     *
+     * @return array
+     */
+    public function getSourceUrls();
+
+    /**
      * Returns the repository reference of this package, e.g. master, 1.0.0 or a commit hash for git
      *
      * @return string The repository reference
      */
     public function getSourceReference();
+
+    /**
+     * Returns the source mirrors of this package
+     *
+     * @return array|null
+     */
+    public function getSourceMirrors();
 
     /**
      * Returns the type of the distribution archive of this version, e.g. zip, tarball
@@ -137,6 +151,13 @@ interface PackageInterface
     public function getDistUrl();
 
     /**
+     * Returns the urls of the distribution archive of this version, including mirrors
+     *
+     * @return array
+     */
+    public function getDistUrls();
+
+    /**
      * Returns the reference of the distribution archive of this version, e.g. master, 1.0.0 or a commit hash for git
      *
      * @return string
@@ -151,6 +172,13 @@ interface PackageInterface
     public function getDistSha1Checksum();
 
     /**
+     * Returns the dist mirrors of this package
+     *
+     * @return array|null
+     */
+    public function getDistMirrors();
+
+    /**
      * Returns the version of this package
      *
      * @return string version
@@ -163,6 +191,16 @@ interface PackageInterface
      * @return string version
      */
     public function getPrettyVersion();
+
+    /**
+     * Returns the pretty version string plus a git or hg commit hash of this package
+     *
+     * @see getPrettyVersion
+     *
+     * @param  bool   $truncate If the source reference is a sha1 hash, truncate it
+     * @return string version
+     */
+    public function getFullPrettyVersion($truncate = true);
 
     /**
      * Returns the release date of the package
@@ -182,7 +220,7 @@ interface PackageInterface
      * Returns a set of links to packages which need to be installed before
      * this package can be installed
      *
-     * @return array An array of package links defining required packages
+     * @return Link[] An array of package links defining required packages
      */
     public function getRequires();
 
@@ -190,7 +228,7 @@ interface PackageInterface
      * Returns a set of links to packages which must not be installed at the
      * same time as this package
      *
-     * @return array An array of package links defining conflicting packages
+     * @return Link[] An array of package links defining conflicting packages
      */
     public function getConflicts();
 
@@ -198,7 +236,7 @@ interface PackageInterface
      * Returns a set of links to virtual packages that are provided through
      * this package
      *
-     * @return array An array of package links defining provided packages
+     * @return Link[] An array of package links defining provided packages
      */
     public function getProvides();
 
@@ -206,7 +244,7 @@ interface PackageInterface
      * Returns a set of links to packages which can alternatively be
      * satisfied by installing this package
      *
-     * @return array An array of package links defining replaced packages
+     * @return Link[] An array of package links defining replaced packages
      */
     public function getReplaces();
 
@@ -214,7 +252,7 @@ interface PackageInterface
      * Returns a set of links to packages which are required to develop
      * this package. These are installed if in dev mode.
      *
-     * @return array An array of package links defining packages required for development
+     * @return Link[] An array of package links defining packages required for development
      */
     public function getDevRequires();
 
@@ -231,12 +269,24 @@ interface PackageInterface
      *
      * {"<type>": {"<namespace": "<directory>"}}
      *
-     * Type is either "psr-0" or "pear". Namespaces are mapped to directories
-     * for autoloading using the type specified.
+     * Type is either "psr-4", "psr-0", "classmap" or "files". Namespaces are mapped to
+     * directories for autoloading using the type specified.
      *
      * @return array Mapping of autoloading rules
      */
     public function getAutoload();
+
+    /**
+     * Returns an associative array of dev autoloading rules
+     *
+     * {"<type>": {"<namespace": "<directory>"}}
+     *
+     * Type is either "psr-4", "psr-0", "classmap" or "files". Namespaces are mapped to
+     * directories for autoloading using the type specified.
+     *
+     * @return array Mapping of dev autoloading rules
+     */
+    public function getDevAutoload();
 
     /**
      * Returns a list of directories which should get added to PHP's
@@ -301,4 +351,11 @@ interface PackageInterface
      * @return array
      */
     public function getArchiveExcludes();
+
+    /**
+     * Returns a list of options to download package dist files
+     *
+     * @return array
+     */
+    public function getTransportOptions();
 }

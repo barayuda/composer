@@ -13,6 +13,7 @@
 namespace Composer\Repository\Vcs;
 
 use Composer\Cache;
+use Composer\Config;
 use Composer\Json\JsonFile;
 use Composer\Util\ProcessExecutor;
 use Composer\Util\Filesystem;
@@ -26,6 +27,9 @@ use Composer\Downloader\TransportException;
  */
 class SvnDriver extends VcsDriver
 {
+    /**
+     * @var Cache
+     */
     protected $cache;
     protected $baseUrl;
     protected $tags;
@@ -33,10 +37,11 @@ class SvnDriver extends VcsDriver
     protected $rootIdentifier;
     protected $infoCache = array();
 
-    protected $trunkPath    = 'trunk';
+    protected $trunkPath = 'trunk';
     protected $branchesPath = 'branches';
-    protected $tagsPath     = 'tags';
-    protected $packagePath   = '';
+    protected $tagsPath = 'tags';
+    protected $packagePath = '';
+    protected $cacheCredentials = true;
 
     /**
      * @var \Composer\Util\Svn
@@ -50,6 +55,8 @@ class SvnDriver extends VcsDriver
     {
         $this->url = $this->baseUrl = rtrim(self::normalizeUrl($this->url), '/');
 
+        SvnUtil::cleanEnv();
+
         if (isset($this->repoConfig['trunk-path'])) {
             $this->trunkPath = $this->repoConfig['trunk-path'];
         }
@@ -58,6 +65,9 @@ class SvnDriver extends VcsDriver
         }
         if (isset($this->repoConfig['tags-path'])) {
             $this->tagsPath = $this->repoConfig['tags-path'];
+        }
+        if (array_key_exists('svn-cache-credentials', $this->repoConfig)) {
+            $this->cacheCredentials = (bool) $this->repoConfig['svn-cache-credentials'];
         }
         if (isset($this->repoConfig['package-path'])) {
             $this->packagePath = '/' . trim($this->repoConfig['package-path'], '/');
@@ -106,54 +116,79 @@ class SvnDriver extends VcsDriver
     }
 
     /**
-     * {@inheritDoc}
+     * {@inheritdoc}
      */
     public function getComposerInformation($identifier)
     {
-        $identifier = '/' . trim($identifier, '/') . '/';
-
-        if ($res = $this->cache->read($identifier.'.json')) {
-            $this->infoCache[$identifier] = JsonFile::parseJson($res);
-        }
-
         if (!isset($this->infoCache[$identifier])) {
-            preg_match('{^(.+?)(@\d+)?/$}', $identifier, $match);
-            if (!empty($match[2])) {
-                $path = $match[1];
-                $rev = $match[2];
-            } else {
-                $path = $identifier;
-                $rev = '';
+            if ($res = $this->cache->read($identifier.'.json')) {
+                return $this->infoCache[$identifier] = JsonFile::parseJson($res);
             }
 
-            try {
-                $resource = $path.'composer.json';
-                $output = $this->execute('svn cat', $this->baseUrl . $resource . $rev);
-                if (!trim($output)) {
-                    return;
-                }
-            } catch (\RuntimeException $e) {
-                throw new TransportException($e->getMessage());
-            }
-
-            $composer = JsonFile::parseJson($output, $this->baseUrl . $resource . $rev);
-
-            if (!isset($composer['time'])) {
-                $output = $this->execute('svn info', $this->baseUrl . $path . $rev);
-                foreach ($this->process->splitLines($output) as $line) {
-                    if ($line && preg_match('{^Last Changed Date: ([^(]+)}', $line, $match)) {
-                        $date = new \DateTime($match[1], new \DateTimeZone('UTC'));
-                        $composer['time'] = $date->format('Y-m-d H:i:s');
-                        break;
-                    }
-                }
-            }
+            $composer = $this->getBaseComposerInformation($identifier);
 
             $this->cache->write($identifier.'.json', json_encode($composer));
+
             $this->infoCache[$identifier] = $composer;
         }
 
         return $this->infoCache[$identifier];
+    }
+
+    /**
+     * @param string $file
+     * @param string $identifier
+     */
+    public function getFileContent($file, $identifier)
+    {
+        $identifier = '/' . trim($identifier, '/') . '/';
+
+        preg_match('{^(.+?)(@\d+)?/$}', $identifier, $match);
+        if (!empty($match[2])) {
+            $path = $match[1];
+            $rev = $match[2];
+        } else {
+            $path = $identifier;
+            $rev = '';
+        }
+
+        try {
+            $resource = $path.$file;
+            $output = $this->execute('svn cat', $this->baseUrl . $resource . $rev);
+            if (!trim($output)) {
+                return null;
+            }
+        } catch (\RuntimeException $e) {
+            throw new TransportException($e->getMessage());
+        }
+
+        return $output;
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function getChangeDate($identifier)
+    {
+        $identifier = '/' . trim($identifier, '/') . '/';
+
+        preg_match('{^(.+?)(@\d+)?/$}', $identifier, $match);
+        if (!empty($match[2])) {
+            $path = $match[1];
+            $rev = $match[2];
+        } else {
+            $path = $identifier;
+            $rev = '';
+        }
+
+        $output = $this->execute('svn info', $this->baseUrl . $path . $rev);
+        foreach ($this->process->splitLines($output) as $line) {
+            if ($line && preg_match('{^Last Changed Date: ([^(]+)}', $line, $match)) {
+                return new \DateTime($match[1], new \DateTimeZone('UTC'));
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -193,17 +228,23 @@ class SvnDriver extends VcsDriver
         if (null === $this->branches) {
             $this->branches = array();
 
-            $output = $this->execute('svn ls --verbose', $this->baseUrl . '/');
+            if (false === $this->trunkPath) {
+                $trunkParent = $this->baseUrl . '/';
+            } else {
+                $trunkParent = $this->baseUrl . '/' . $this->trunkPath;
+            }
+
+            $output = $this->execute('svn ls --verbose', $trunkParent);
             if ($output) {
                 foreach ($this->process->splitLines($output) as $line) {
                     $line = trim($line);
                     if ($line && preg_match('{^\s*(\S+).*?(\S+)\s*$}', $line, $match)) {
-                        if (isset($match[1]) && isset($match[2]) && $match[2] === $this->trunkPath . '/') {
-                            $this->branches[$this->trunkPath] = $this->buildIdentifier(
+                        if (isset($match[1]) && isset($match[2]) && $match[2] === './') {
+                            $this->branches['trunk'] = $this->buildIdentifier(
                                 '/' . $this->trunkPath,
                                 $match[1]
                             );
-                            $this->rootIdentifier = $this->branches[$this->trunkPath];
+                            $this->rootIdentifier = $this->branches['trunk'];
                             break;
                         }
                     }
@@ -235,7 +276,7 @@ class SvnDriver extends VcsDriver
     /**
      * {@inheritDoc}
      */
-    public static function supports(IOInterface $io, $url, $deep = false)
+    public static function supports(IOInterface $io, Config $config, $url, $deep = false)
     {
         $url = self::normalizeUrl($url);
         if (preg_match('#(^svn://|^svn\+ssh://|svn\.)#i', $url)) {
@@ -243,7 +284,7 @@ class SvnDriver extends VcsDriver
         }
 
         // proceed with deep check for local urls since they are fast to process
-        if (!$deep && !static::isLocalUrl($url)) {
+        if (!$deep && !Filesystem::isLocalPath($url)) {
             return false;
         }
 
@@ -259,8 +300,16 @@ class SvnDriver extends VcsDriver
             return true;
         }
 
+        // Subversion client 1.7 and older
         if (false !== stripos($processExecutor->getErrorOutput(), 'authorization failed:')) {
             // This is likely a remote Subversion repository that requires
+            // authentication. We will handle actual authentication later.
+            return true;
+        }
+
+        // Subversion client 1.8 and newer
+        if (false !== stripos($processExecutor->getErrorOutput(), 'Authentication failed')) {
+            // This is likely a remote Subversion or newer repository that requires
             // authentication. We will handle actual authentication later.
             return true;
         }
@@ -297,7 +346,8 @@ class SvnDriver extends VcsDriver
     protected function execute($command, $url)
     {
         if (null === $this->util) {
-            $this->util = new SvnUtil($this->baseUrl, $this->io, $this->process);
+            $this->util = new SvnUtil($this->baseUrl, $this->io, $this->config, $this->process);
+            $this->util->setCacheCredentials($this->cacheCredentials);
         }
 
         try {

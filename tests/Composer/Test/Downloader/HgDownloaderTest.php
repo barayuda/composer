@@ -13,9 +13,28 @@
 namespace Composer\Test\Downloader;
 
 use Composer\Downloader\HgDownloader;
+use Composer\TestCase;
+use Composer\Util\Filesystem;
+use Composer\Util\Platform;
 
-class HgDownloaderTest extends \PHPUnit_Framework_TestCase
+class HgDownloaderTest extends TestCase
 {
+    /** @var string */
+    private $workingDir;
+
+    protected function setUp()
+    {
+        $this->workingDir = $this->getUniqueTmpDirectory();
+    }
+
+    protected function tearDown()
+    {
+        if (is_dir($this->workingDir)) {
+            $fs = new Filesystem;
+            $fs->removeDirectory($this->workingDir);
+        }
+    }
+
     protected function getDownloaderMock($io = null, $config = null, $executor = null, $filesystem = null)
     {
         $io = $io ?: $this->getMock('Composer\IO\IOInterface');
@@ -47,8 +66,8 @@ class HgDownloaderTest extends \PHPUnit_Framework_TestCase
             ->method('getSourceReference')
             ->will($this->returnValue('ref'));
         $packageMock->expects($this->once())
-            ->method('getSourceUrl')
-            ->will($this->returnValue('https://mercurial.dev/l3l0/composer'));
+            ->method('getSourceUrls')
+            ->will($this->returnValue(array('https://mercurial.dev/l3l0/composer')));
         $processExecutor = $this->getMock('Composer\Util\ProcessExecutor');
 
         $expectedGitCommand = $this->getCmd('hg clone \'https://mercurial.dev/l3l0/composer\' \'composerPath\'');
@@ -84,23 +103,30 @@ class HgDownloaderTest extends \PHPUnit_Framework_TestCase
 
     public function testUpdate()
     {
+        $fs = new Filesystem;
+        $fs->ensureDirectoryExists($this->workingDir.'/.hg');
         $packageMock = $this->getMock('Composer\Package\PackageInterface');
         $packageMock->expects($this->any())
             ->method('getSourceReference')
             ->will($this->returnValue('ref'));
         $packageMock->expects($this->any())
-            ->method('getSourceUrl')
-            ->will($this->returnValue('https://github.com/l3l0/composer'));
+            ->method('getSourceUrls')
+            ->will($this->returnValue(array('https://github.com/l3l0/composer')));
         $processExecutor = $this->getMock('Composer\Util\ProcessExecutor');
 
-        $expectedGitCommand = $this->getCmd("hg pull 'https://github.com/l3l0/composer' && hg up 'ref'");
+        $expectedHgCommand = $this->getCmd("hg st");
         $processExecutor->expects($this->at(0))
             ->method('execute')
-            ->with($this->equalTo($expectedGitCommand))
+            ->with($this->equalTo($expectedHgCommand))
+            ->will($this->returnValue(0));
+        $expectedHgCommand = $this->getCmd("hg pull 'https://github.com/l3l0/composer' && hg up 'ref'");
+        $processExecutor->expects($this->at(1))
+            ->method('execute')
+            ->with($this->equalTo($expectedHgCommand))
             ->will($this->returnValue(0));
 
         $downloader = $this->getDownloaderMock(null, null, $processExecutor);
-        $downloader->update($packageMock, $packageMock, 'composerPath');
+        $downloader->update($packageMock, $packageMock, $this->workingDir);
     }
 
     public function testRemove()
@@ -131,10 +157,6 @@ class HgDownloaderTest extends \PHPUnit_Framework_TestCase
 
     private function getCmd($cmd)
     {
-        if (defined('PHP_WINDOWS_VERSION_BUILD')) {
-            return strtr($cmd, "'", '"');
-        }
-
-        return $cmd;
+        return Platform::isWindows() ? strtr($cmd, "'", '"') : $cmd;
     }
 }

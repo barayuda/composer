@@ -10,9 +10,11 @@
  * file that was distributed with this source code.
  */
 
-namespace Composer\Repository\Pear;
+namespace Composer\Test\Repository\Pear;
 
-use Composer\Test\TestCase;
+use Composer\Repository\Pear\DependencyConstraint;
+use Composer\Repository\Pear\PackageDependencyParser;
+use Composer\TestCase;
 
 class PackageDependencyParserTest extends TestCase
 {

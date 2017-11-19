@@ -14,9 +14,11 @@ namespace Composer\Package\Loader;
 
 use Composer\Package;
 use Composer\Package\AliasPackage;
+use Composer\Package\Link;
 use Composer\Package\RootAliasPackage;
 use Composer\Package\RootPackageInterface;
 use Composer\Package\Version\VersionParser;
+use Composer\Semver\VersionParser as SemverVersionParser;
 
 /**
  * @author Konstantin Kudryashiv <ever.zet@gmail.com>
@@ -25,13 +27,15 @@ use Composer\Package\Version\VersionParser;
 class ArrayLoader implements LoaderInterface
 {
     protected $versionParser;
+    protected $loadOptions;
 
-    public function __construct(VersionParser $parser = null)
+    public function __construct(SemverVersionParser $parser = null, $loadOptions = false)
     {
         if (!$parser) {
             $parser = new VersionParser;
         }
         $this->versionParser = $parser;
+        $this->loadOptions = $loadOptions;
     }
 
     public function load(array $config, $class = 'Composer\Package\CompletePackage')
@@ -65,7 +69,7 @@ class ArrayLoader implements LoaderInterface
                 throw new \UnexpectedValueException('Package '.$config['name'].'\'s bin key should be an array, '.gettype($config['bin']).' given.');
             }
             foreach ($config['bin'] as $key => $bin) {
-                $config['bin'][$key]= ltrim($bin, '/');
+                $config['bin'][$key] = ltrim($bin, '/');
             }
             $package->setBinaries($config['bin']);
         }
@@ -85,6 +89,9 @@ class ArrayLoader implements LoaderInterface
             $package->setSourceType($config['source']['type']);
             $package->setSourceUrl($config['source']['url']);
             $package->setSourceReference($config['source']['reference']);
+            if (isset($config['source']['mirrors'])) {
+                $package->setSourceMirrors($config['source']['mirrors']);
+            }
         }
 
         if (isset($config['dist'])) {
@@ -101,13 +108,16 @@ class ArrayLoader implements LoaderInterface
             $package->setDistUrl($config['dist']['url']);
             $package->setDistReference(isset($config['dist']['reference']) ? $config['dist']['reference'] : null);
             $package->setDistSha1Checksum(isset($config['dist']['shasum']) ? $config['dist']['shasum'] : null);
+            if (isset($config['dist']['mirrors'])) {
+                $package->setDistMirrors($config['dist']['mirrors']);
+            }
         }
 
         foreach (Package\BasePackage::$supportedLinkTypes as $type => $opts) {
             if (isset($config[$type])) {
                 $method = 'set'.ucfirst($opts['method']);
                 $package->{$method}(
-                    $this->versionParser->parseLinks(
+                    $this->parseLinks(
                         $package->getName(),
                         $package->getPrettyVersion(),
                         $opts['description'],
@@ -130,12 +140,16 @@ class ArrayLoader implements LoaderInterface
             $package->setAutoload($config['autoload']);
         }
 
+        if (isset($config['autoload-dev'])) {
+            $package->setDevAutoload($config['autoload-dev']);
+        }
+
         if (isset($config['include-path'])) {
             $package->setIncludePaths($config['include-path']);
         }
 
         if (!empty($config['time'])) {
-            $time = ctype_digit($config['time']) ? '@'.$config['time'] : $config['time'];
+            $time = preg_match('/^\d++$/D', $config['time']) ? '@'.$config['time'] : $config['time'];
 
             try {
                 $date = new \DateTime($time, new \DateTimeZone('UTC'));
@@ -156,6 +170,9 @@ class ArrayLoader implements LoaderInterface
             if (isset($config['scripts']) && is_array($config['scripts'])) {
                 foreach ($config['scripts'] as $event => $listeners) {
                     $config['scripts'][$event] = (array) $listeners;
+                }
+                if (isset($config['scripts']['composer'])) {
+                    trigger_error('The `composer` script name is reserved for internal use, please avoid defining it', E_USER_DEPRECATED);
                 }
                 $package->setScripts($config['scripts']);
             }
@@ -183,6 +200,10 @@ class ArrayLoader implements LoaderInterface
             if (isset($config['support'])) {
                 $package->setSupport($config['support']);
             }
+
+            if (isset($config['abandoned'])) {
+                $package->setAbandoned($config['abandoned']);
+            }
         }
 
         if ($aliasNormalized = $this->getBranchAlias($config)) {
@@ -193,7 +214,37 @@ class ArrayLoader implements LoaderInterface
             }
         }
 
+        if ($this->loadOptions && isset($config['transport-options'])) {
+            $package->setTransportOptions($config['transport-options']);
+        }
+
         return $package;
+    }
+
+    /**
+     * @param  string $source        source package name
+     * @param  string $sourceVersion source package version (pretty version ideally)
+     * @param  string $description   link description (e.g. requires, replaces, ..)
+     * @param  array  $links         array of package name => constraint mappings
+     * @return Link[]
+     */
+    public function parseLinks($source, $sourceVersion, $description, $links)
+    {
+        $res = array();
+        foreach ($links as $target => $constraint) {
+            if (!is_string($constraint)) {
+                throw new \UnexpectedValueException('Link constraint in '.$source.' '.$description.' > '.$target.' should be a string, got '.gettype($constraint) . ' (' . var_export($constraint, true) . ')');
+            }
+            if ('self.version' === $constraint) {
+                $parsedConstraint = $this->versionParser->parseConstraints($sourceVersion);
+            } else {
+                $parsedConstraint = $this->versionParser->parseConstraints($constraint);
+            }
+
+            $res[strtolower($target)] = new Link($source, $target, $parsedConstraint, $description, $constraint);
+        }
+
+        return $res;
     }
 
     /**
@@ -204,7 +255,7 @@ class ArrayLoader implements LoaderInterface
      */
     public function getBranchAlias(array $config)
     {
-        if ('dev-' !== substr($config['version'], 0, 4)
+        if (('dev-' !== substr($config['version'], 0, 4) && '-dev' !== substr($config['version'], -4))
             || !isset($config['extra']['branch-alias'])
             || !is_array($config['extra']['branch-alias'])
         ) {
@@ -225,6 +276,14 @@ class ArrayLoader implements LoaderInterface
 
             // ensure that it is the current branch aliasing itself
             if (strtolower($config['version']) !== strtolower($sourceBranch)) {
+                continue;
+            }
+
+            // If using numeric aliases ensure the alias is a valid subversion
+            if (($sourcePrefix = $this->versionParser->parseNumericAliasPrefix($sourceBranch))
+                && ($targetPrefix = $this->versionParser->parseNumericAliasPrefix($targetBranch))
+                && (stripos($targetPrefix, $sourcePrefix) !== 0)
+            ) {
                 continue;
             }
 

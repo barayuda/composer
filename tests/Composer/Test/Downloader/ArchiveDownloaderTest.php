@@ -33,6 +33,10 @@ class ArchiveDownloaderTest extends \PHPUnit_Framework_TestCase
 
     public function testProcessUrl()
     {
+        if (!extension_loaded('openssl')) {
+            $this->markTestSkipped('Requires openssl');
+        }
+
         $downloader = $this->getMockForAbstractClass('Composer\Downloader\ArchiveDownloader', array($this->getMock('Composer\IO\IOInterface'), $this->getMock('Composer\Config')));
         $method = new \ReflectionMethod($downloader, 'processUrl');
         $method->setAccessible(true);
@@ -40,15 +44,15 @@ class ArchiveDownloaderTest extends \PHPUnit_Framework_TestCase
         $expected = 'https://github.com/composer/composer/zipball/master';
         $url = $method->invoke($downloader, $this->getMock('Composer\Package\PackageInterface'), $expected);
 
-        if (extension_loaded('openssl')) {
-            $this->assertEquals($expected, $url);
-        } else {
-            $this->assertEquals('http://nodeload.github.com/composer/composer/zip/master', $url);
-        }
+        $this->assertEquals($expected, $url);
     }
 
     public function testProcessUrl2()
     {
+        if (!extension_loaded('openssl')) {
+            $this->markTestSkipped('Requires openssl');
+        }
+
         $downloader = $this->getMockForAbstractClass('Composer\Downloader\ArchiveDownloader', array($this->getMock('Composer\IO\IOInterface'), $this->getMock('Composer\Config')));
         $method = new \ReflectionMethod($downloader, 'processUrl');
         $method->setAccessible(true);
@@ -56,15 +60,15 @@ class ArchiveDownloaderTest extends \PHPUnit_Framework_TestCase
         $expected = 'https://github.com/composer/composer/archive/master.tar.gz';
         $url = $method->invoke($downloader, $this->getMock('Composer\Package\PackageInterface'), $expected);
 
-        if (extension_loaded('openssl')) {
-            $this->assertEquals($expected, $url);
-        } else {
-            $this->assertEquals('http://nodeload.github.com/composer/composer/tar.gz/master', $url);
-        }
+        $this->assertEquals($expected, $url);
     }
 
     public function testProcessUrl3()
     {
+        if (!extension_loaded('openssl')) {
+            $this->markTestSkipped('Requires openssl');
+        }
+
         $downloader = $this->getMockForAbstractClass('Composer\Downloader\ArchiveDownloader', array($this->getMock('Composer\IO\IOInterface'), $this->getMock('Composer\Config')));
         $method = new \ReflectionMethod($downloader, 'processUrl');
         $method->setAccessible(true);
@@ -72,11 +76,7 @@ class ArchiveDownloaderTest extends \PHPUnit_Framework_TestCase
         $expected = 'https://api.github.com/repos/composer/composer/zipball/master';
         $url = $method->invoke($downloader, $this->getMock('Composer\Package\PackageInterface'), $expected);
 
-        if (extension_loaded('openssl')) {
-            $this->assertEquals($expected, $url);
-        } else {
-            $this->assertEquals('http://nodeload.github.com/composer/composer/zip/master', $url);
-        }
+        $this->assertEquals($expected, $url);
     }
 
     /**
@@ -84,6 +84,10 @@ class ArchiveDownloaderTest extends \PHPUnit_Framework_TestCase
      */
     public function testProcessUrlRewriteDist($url)
     {
+        if (!extension_loaded('openssl')) {
+            $this->markTestSkipped('Requires openssl');
+        }
+
         $downloader = $this->getMockForAbstractClass('Composer\Downloader\ArchiveDownloader', array($this->getMock('Composer\IO\IOInterface'), $this->getMock('Composer\Config')));
         $method = new \ReflectionMethod($downloader, 'processUrl');
         $method->setAccessible(true);
@@ -97,11 +101,7 @@ class ArchiveDownloaderTest extends \PHPUnit_Framework_TestCase
             ->will($this->returnValue('ref'));
         $url = $method->invoke($downloader, $package, $url);
 
-        if (extension_loaded('openssl')) {
-            $this->assertEquals($expected, $url);
-        } else {
-            $this->assertEquals('http://nodeload.github.com/composer/composer/'.$type.'/ref', $url);
-        }
+        $this->assertEquals($expected, $url);
     }
 
     public function provideUrls()
@@ -113,6 +113,40 @@ class ArchiveDownloaderTest extends \PHPUnit_Framework_TestCase
             array('https://www.github.com/composer/composer/tarball/master'),
             array('https://github.com/composer/composer/archive/master.zip'),
             array('https://github.com/composer/composer/archive/master.tar.gz'),
+        );
+    }
+
+    /**
+     * @dataProvider provideBitbucketUrls
+     */
+    public function testProcessUrlRewriteBitbucketDist($url, $extension)
+    {
+        if (!extension_loaded('openssl')) {
+            $this->markTestSkipped('Requires openssl');
+        }
+
+        $downloader = $this->getMockForAbstractClass('Composer\Downloader\ArchiveDownloader', array($this->getMock('Composer\IO\IOInterface'), $this->getMock('Composer\Config')));
+        $method = new \ReflectionMethod($downloader, 'processUrl');
+        $method->setAccessible(true);
+
+        $url = $url . '.' . $extension;
+        $expected = 'https://bitbucket.org/davereid/drush-virtualhost/get/ref.' . $extension;
+
+        $package = $this->getMock('Composer\Package\PackageInterface');
+        $package->expects($this->any())
+            ->method('getDistReference')
+            ->will($this->returnValue('ref'));
+        $url = $method->invoke($downloader, $package, $url);
+
+        $this->assertEquals($expected, $url);
+    }
+
+    public function provideBitbucketUrls()
+    {
+        return array(
+            array('https://bitbucket.org/davereid/drush-virtualhost/get/77ca490c26ac818e024d1138aa8bd3677d1ef21f', 'zip'),
+            array('https://bitbucket.org/davereid/drush-virtualhost/get/master', 'tar.gz'),
+            array('https://bitbucket.org/davereid/drush-virtualhost/get/v1.0', 'tar.bz2'),
         );
     }
 }

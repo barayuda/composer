@@ -15,13 +15,12 @@ namespace Composer\Package\Loader;
 use Composer\Package\BasePackage;
 use Composer\Package\AliasPackage;
 use Composer\Config;
-use Composer\Factory;
+use Composer\Package\RootPackageInterface;
+use Composer\Repository\RepositoryFactory;
+use Composer\Package\Version\VersionGuesser;
 use Composer\Package\Version\VersionParser;
 use Composer\Repository\RepositoryManager;
-use Composer\Repository\Vcs\HgDriver;
-use Composer\IO\NullIO;
 use Composer\Util\ProcessExecutor;
-use Composer\Util\Git as GitUtil;
 
 /**
  * ArrayLoader built for the sole purpose of loading the root package
@@ -32,42 +31,84 @@ use Composer\Util\Git as GitUtil;
  */
 class RootPackageLoader extends ArrayLoader
 {
+    /**
+     * @var RepositoryManager
+     */
     private $manager;
-    private $config;
-    private $process;
 
-    public function __construct(RepositoryManager $manager, Config $config, VersionParser $parser = null, ProcessExecutor $process = null)
+    /**
+     * @var Config
+     */
+    private $config;
+
+    /**
+     * @var VersionGuesser
+     */
+    private $versionGuesser;
+
+    public function __construct(RepositoryManager $manager, Config $config, VersionParser $parser = null, VersionGuesser $versionGuesser = null)
     {
+        parent::__construct($parser);
+
         $this->manager = $manager;
         $this->config = $config;
-        $this->process = $process ?: new ProcessExecutor();
-        parent::__construct($parser);
+        $this->versionGuesser = $versionGuesser ?: new VersionGuesser($config, new ProcessExecutor(), $this->versionParser);
     }
 
-    public function load(array $config, $class = 'Composer\Package\RootPackage')
+    /**
+     * @param  array                $config package data
+     * @param  string               $class  FQCN to be instantiated
+     * @param  string               $cwd    cwd of the root package to be used to guess the version if it is not provided
+     * @return RootPackageInterface
+     */
+    public function load(array $config, $class = 'Composer\Package\RootPackage', $cwd = null)
     {
         if (!isset($config['name'])) {
             $config['name'] = '__root__';
         }
+        $autoVersioned = false;
         if (!isset($config['version'])) {
             // override with env var if available
             if (getenv('COMPOSER_ROOT_VERSION')) {
                 $version = getenv('COMPOSER_ROOT_VERSION');
+                $commit = null;
             } else {
-                $version = $this->guessVersion($config);
+                $versionData = $this->versionGuesser->guessVersion($config, $cwd ?: getcwd());
+                $version = $versionData['version'];
+                $commit = $versionData['commit'];
             }
 
             if (!$version) {
                 $version = '1.0.0';
+                $autoVersioned = true;
             }
 
             $config['version'] = $version;
+            if ($commit) {
+                $config['source'] = array(
+                    'type' => '',
+                    'url' => '',
+                    'reference' => $commit,
+                );
+                $config['dist'] = array(
+                    'type' => '',
+                    'url' => '',
+                    'reference' => $commit,
+                );
+            }
         }
 
         $realPackage = $package = parent::load($config, $class);
-
         if ($realPackage instanceof AliasPackage) {
             $realPackage = $package->getAliasOf();
+        }
+
+        if ($autoVersioned) {
+            $realPackage->replaceVersion($realPackage->getVersion(), 'No version set (parsed as 1.0.0)');
+        }
+
+        if (isset($config['minimum-stability'])) {
+            $realPackage->setMinimumStability(VersionParser::normalizeStability($config['minimum-stability']));
         }
 
         $aliases = array();
@@ -82,24 +123,29 @@ class RootPackageLoader extends ArrayLoader
                     $links[$link->getTarget()] = $link->getConstraint()->getPrettyString();
                 }
                 $aliases = $this->extractAliases($links, $aliases);
-                $stabilityFlags = $this->extractStabilityFlags($links, $stabilityFlags);
+                $stabilityFlags = $this->extractStabilityFlags($links, $stabilityFlags, $realPackage->getMinimumStability());
                 $references = $this->extractReferences($links, $references);
             }
+        }
+
+        if (isset($links[$config['name']])) {
+            throw new \InvalidArgumentException(sprintf('Root package \'%s\' cannot require itself in its composer.json' . PHP_EOL .
+                        'Did you accidentally name your root package after an external package?', $config['name']));
         }
 
         $realPackage->setAliases($aliases);
         $realPackage->setStabilityFlags($stabilityFlags);
         $realPackage->setReferences($references);
 
-        if (isset($config['minimum-stability'])) {
-            $realPackage->setMinimumStability(VersionParser::normalizeStability($config['minimum-stability']));
-        }
-
         if (isset($config['prefer-stable'])) {
             $realPackage->setPreferStable((bool) $config['prefer-stable']);
         }
 
-        $repos = Factory::createDefaultRepositories(null, $this->config, $this->manager);
+        if (isset($config['config'])) {
+            $realPackage->setConfig($config['config']);
+        }
+
+        $repos = RepositoryFactory::defaultRepos(null, $this->config, $this->manager);
         foreach ($repos as $repo) {
             $this->manager->addRepository($repo);
         }
@@ -124,32 +170,53 @@ class RootPackageLoader extends ArrayLoader
         return $aliases;
     }
 
-    private function extractStabilityFlags(array $requires, array $stabilityFlags)
+    private function extractStabilityFlags(array $requires, array $stabilityFlags, $minimumStability)
     {
         $stabilities = BasePackage::$stabilities;
+        $minimumStability = $stabilities[$minimumStability];
         foreach ($requires as $reqName => $reqVersion) {
-            // parse explicit stability flags
-            if (preg_match('{^[^,\s]*?@('.implode('|', array_keys($stabilities)).')$}i', $reqVersion, $match)) {
-                $name = strtolower($reqName);
-                $stability = $stabilities[VersionParser::normalizeStability($match[1])];
+            $constraints = array();
 
-                if (isset($stabilityFlags[$name]) && $stabilityFlags[$name] > $stability) {
-                    continue;
+            // extract all sub-constraints in case it is an OR/AND multi-constraint
+            $orSplit = preg_split('{\s*\|\|?\s*}', trim($reqVersion));
+            foreach ($orSplit as $orConstraint) {
+                $andSplit = preg_split('{(?<!^|as|[=>< ,]) *(?<!-)[, ](?!-) *(?!,|as|$)}', $orConstraint);
+                foreach ($andSplit as $andConstraint) {
+                    $constraints[] = $andConstraint;
                 }
-                $stabilityFlags[$name] = $stability;
+            }
 
+            // parse explicit stability flags to the most unstable
+            $match = false;
+            foreach ($constraints as $constraint) {
+                if (preg_match('{^[^@]*?@('.implode('|', array_keys($stabilities)).')$}i', $constraint, $match)) {
+                    $name = strtolower($reqName);
+                    $stability = $stabilities[VersionParser::normalizeStability($match[1])];
+
+                    if (isset($stabilityFlags[$name]) && $stabilityFlags[$name] > $stability) {
+                        continue;
+                    }
+                    $stabilityFlags[$name] = $stability;
+                    $match = true;
+                }
+            }
+
+            if ($match) {
                 continue;
             }
 
-            // infer flags for requirements that have an explicit -dev or -beta version specified for example
-            $reqVersion = preg_replace('{^([^,\s@]+) as .+$}', '$1', $reqVersion);
-            if (preg_match('{^[^,\s@]+$}', $reqVersion) && 'stable' !== ($stabilityName = VersionParser::parseStability($reqVersion))) {
-                $name = strtolower($reqName);
-                $stability = $stabilities[$stabilityName];
-                if (isset($stabilityFlags[$name]) && $stabilityFlags[$name] > $stability) {
-                    continue;
+            foreach ($constraints as $constraint) {
+                // infer flags for requirements that have an explicit -dev or -beta version specified but only
+                // for those that are more unstable than the minimumStability or existing flags
+                $reqVersion = preg_replace('{^([^,\s@]+) as .+$}', '$1', $constraint);
+                if (preg_match('{^[^,\s@]+$}', $reqVersion) && 'stable' !== ($stabilityName = VersionParser::parseStability($reqVersion))) {
+                    $name = strtolower($reqName);
+                    $stability = $stabilities[$stabilityName];
+                    if ((isset($stabilityFlags[$name]) && $stabilityFlags[$name] > $stability) || ($minimumStability > $stability)) {
+                        continue;
+                    }
+                    $stabilityFlags[$name] = $stability;
                 }
-                $stabilityFlags[$name] = $stability;
             }
         }
 
@@ -167,122 +234,5 @@ class RootPackageLoader extends ArrayLoader
         }
 
         return $references;
-    }
-
-    private function guessVersion(array $config)
-    {
-        if (function_exists('proc_open')) {
-            $version = $this->guessGitVersion($config);
-            if (null !== $version) {
-                return $version;
-            }
-
-            return $this->guessHgVersion($config);
-        }
-    }
-
-    private function guessGitVersion(array $config)
-    {
-        $util = new GitUtil;
-        $util->cleanEnv();
-
-        // try to fetch current version from git branch
-        if (0 === $this->process->execute('git branch --no-color --no-abbrev -v', $output)) {
-            $branches = array();
-            $isFeatureBranch = false;
-            $version = null;
-
-            // find current branch and collect all branch names
-            foreach ($this->process->splitLines($output) as $branch) {
-                if ($branch && preg_match('{^(?:\* ) *(\S+|\(no branch\)) *([a-f0-9]+) .*$}', $branch, $match)) {
-                    if ($match[1] === '(no branch)') {
-                        $version = 'dev-'.$match[2];
-                        $isFeatureBranch = true;
-                    } else {
-                        $version = $this->versionParser->normalizeBranch($match[1]);
-                        $isFeatureBranch = 0 === strpos($version, 'dev-');
-                        if ('9999999-dev' === $version) {
-                            $version = 'dev-'.$match[1];
-                        }
-                    }
-                }
-
-                if ($branch && !preg_match('{^ *[^/]+/HEAD }', $branch)) {
-                    if (preg_match('{^(?:\* )? *(\S+) *([a-f0-9]+) .*$}', $branch, $match)) {
-                        $branches[] = $match[1];
-                    }
-                }
-            }
-
-            if (!$isFeatureBranch) {
-                return $version;
-            }
-
-            // try to find the best (nearest) version branch to assume this feature's version
-            $version = $this->guessFeatureVersion($config, $version, $branches, 'git rev-list %candidate%..%branch%');
-
-            return $version;
-        }
-    }
-
-    private function guessHgVersion(array $config)
-    {
-        // try to fetch current version from hg branch
-        if (0 === $this->process->execute('hg branch', $output)) {
-            $branch = trim($output);
-            $version = $this->versionParser->normalizeBranch($branch);
-            $isFeatureBranch = 0 === strpos($version, 'dev-');
-
-            if ('9999999-dev' === $version) {
-                $version = 'dev-'.$branch;
-            }
-
-            if (!$isFeatureBranch) {
-                return $version;
-            }
-
-            // re-use the HgDriver to fetch branches (this properly includes bookmarks)
-            $config = array('url' => getcwd());
-            $driver = new HgDriver($config, new NullIO(), $this->config, $this->process);
-            $branches = array_keys($driver->getBranches());
-
-            // try to find the best (nearest) version branch to assume this feature's version
-            $version = $this->guessFeatureVersion($config, $version, $branches, 'hg log -r "not ancestors(\'%candidate%\') and ancestors(\'%branch%\')" --template "{node}\\n"');
-
-            return $version;
-        }
-    }
-
-    private function guessFeatureVersion(array $config, $version, array $branches, $scmCmdline)
-    {
-        // ignore feature branches if they have no branch-alias or self.version is used
-        // and find the branch they came from to use as a version instead
-        if ((isset($config['extra']['branch-alias']) && !isset($config['extra']['branch-alias'][$version]))
-            || strpos(json_encode($config), '"self.version"')
-        ) {
-            $branch = preg_replace('{^dev-}', '', $version);
-            $length = PHP_INT_MAX;
-            foreach ($branches as $candidate) {
-                // do not compare against other feature branches
-                if ($candidate === $branch || !preg_match('{^(master|trunk|default|develop|\d+\..+)$}', $candidate, $match)) {
-                    continue;
-                }
-
-                $cmdLine = str_replace(array('%candidate%', '%branch%'), array($candidate, $branch), $scmCmdline);
-                if (0 !== $this->process->execute($cmdLine, $output)) {
-                    continue;
-                }
-
-                if (strlen($output) < $length) {
-                    $length = strlen($output);
-                    $version = $this->versionParser->normalizeBranch($candidate);
-                    if ('9999999-dev' === $version) {
-                        $version = 'dev-'.$match[1];
-                    }
-                }
-            }
-        }
-
-        return $version;
     }
 }

@@ -12,7 +12,7 @@
 
 namespace Composer\DependencyResolver;
 
-use Composer\Package\LinkConstraint\LinkConstraintInterface;
+use Composer\Semver\Constraint\ConstraintInterface;
 
 /**
  * @author Nils Adermann <naderman@naderman.de>
@@ -20,45 +20,55 @@ use Composer\Package\LinkConstraint\LinkConstraintInterface;
 class Request
 {
     protected $jobs;
-    protected $pool;
 
-    public function __construct(Pool $pool)
+    public function __construct()
     {
-        $this->pool = $pool;
         $this->jobs = array();
     }
 
-    public function install($packageName, LinkConstraintInterface $constraint = null)
+    public function install($packageName, ConstraintInterface $constraint = null)
     {
         $this->addJob($packageName, 'install', $constraint);
     }
 
-    public function update($packageName, LinkConstraintInterface $constraint = null)
+    public function update($packageName, ConstraintInterface $constraint = null)
     {
         $this->addJob($packageName, 'update', $constraint);
     }
 
-    public function remove($packageName, LinkConstraintInterface $constraint = null)
+    public function remove($packageName, ConstraintInterface $constraint = null)
     {
         $this->addJob($packageName, 'remove', $constraint);
     }
 
-    protected function addJob($packageName, $cmd, LinkConstraintInterface $constraint = null)
+    /**
+     * Mark an existing package as being installed and having to remain installed
+     *
+     * These jobs will not be tempered with by the solver
+     *
+     * @param string                   $packageName
+     * @param ConstraintInterface|null $constraint
+     */
+    public function fix($packageName, ConstraintInterface $constraint = null)
+    {
+        $this->addJob($packageName, 'install', $constraint, true);
+    }
+
+    protected function addJob($packageName, $cmd, ConstraintInterface $constraint = null, $fixed = false)
     {
         $packageName = strtolower($packageName);
-        $packages = $this->pool->whatProvides($packageName, $constraint);
 
         $this->jobs[] = array(
-            'packages' => $packages,
             'cmd' => $cmd,
             'packageName' => $packageName,
             'constraint' => $constraint,
+            'fixed' => $fixed,
         );
     }
 
     public function updateAll()
     {
-        $this->jobs[] = array('cmd' => 'update-all', 'packages' => array());
+        $this->jobs[] = array('cmd' => 'update-all');
     }
 
     public function getJobs()

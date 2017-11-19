@@ -14,25 +14,33 @@ namespace Composer\Package\Loader;
 
 use Composer\Package;
 use Composer\Package\BasePackage;
+use Composer\Semver\Constraint\Constraint;
 use Composer\Package\Version\VersionParser;
+use Composer\Repository\PlatformRepository;
 
 /**
  * @author Jordi Boggiano <j.boggiano@seld.be>
  */
 class ValidatingArrayLoader implements LoaderInterface
 {
+    const CHECK_ALL = 3;
+    const CHECK_UNBOUND_CONSTRAINTS = 1;
+    const CHECK_STRICT_CONSTRAINTS = 2;
+
     private $loader;
     private $versionParser;
     private $errors;
     private $warnings;
     private $config;
     private $strictName;
+    private $flags;
 
-    public function __construct(LoaderInterface $loader, $strictName = true, VersionParser $parser = null)
+    public function __construct(LoaderInterface $loader, $strictName = true, VersionParser $parser = null, $flags = 0)
     {
         $this->loader = $loader;
         $this->versionParser = $parser ?: new VersionParser();
         $this->strictName = $strictName;
+        $this->flags = $flags;
     }
 
     public function load(array $config, $class = 'Composer\Package\CompletePackage')
@@ -51,8 +59,18 @@ class ValidatingArrayLoader implements LoaderInterface
             try {
                 $this->versionParser->normalize($this->config['version']);
             } catch (\Exception $e) {
-                unset($this->config['version']);
                 $this->errors[] = 'version : invalid value ('.$this->config['version'].'): '.$e->getMessage();
+                unset($this->config['version']);
+            }
+        }
+
+        if (!empty($this->config['config']['platform'])) {
+            foreach ((array) $this->config['config']['platform'] as $key => $platform) {
+                try {
+                    $this->versionParser->normalize($platform);
+                } catch (\Exception $e) {
+                    $this->errors[] = 'config.platform.' . $key . ' : invalid value ('.$platform.'): '.$e->getMessage();
+                }
             }
         }
 
@@ -63,7 +81,7 @@ class ValidatingArrayLoader implements LoaderInterface
         $this->validateArray('scripts'); // TODO validate event names & listener syntax
         $this->validateString('description');
         $this->validateUrl('homepage');
-        $this->validateFlatArray('keywords', '[A-Za-z0-9 ._-]+');
+        $this->validateFlatArray('keywords', '[\p{N}\p{L} ._-]+');
 
         if (isset($this->config['license'])) {
             if (is_string($this->config['license'])) {
@@ -114,7 +132,7 @@ class ValidatingArrayLoader implements LoaderInterface
         }
 
         if ($this->validateArray('support') && !empty($this->config['support'])) {
-            foreach (array('issues', 'forum', 'wiki', 'source', 'email', 'irc') as $key) {
+            foreach (array('issues', 'forum', 'wiki', 'source', 'email', 'irc', 'docs', 'rss') as $key) {
                 if (isset($this->config['support'][$key]) && !is_string($this->config['support'][$key])) {
                     $this->errors[] = 'support.'.$key.' : invalid value, must be a string';
                     unset($this->config['support'][$key]);
@@ -131,7 +149,7 @@ class ValidatingArrayLoader implements LoaderInterface
                 unset($this->config['support']['irc']);
             }
 
-            foreach (array('issues', 'forum', 'wiki', 'source') as $key) {
+            foreach (array('issues', 'forum', 'wiki', 'source', 'docs') as $key) {
                 if (isset($this->config['support'][$key]) && !$this->filterUrl($this->config['support'][$key])) {
                     $this->warnings[] = 'support.'.$key.' : invalid value ('.$this->config['support'][$key].'), must be an http/https URL';
                     unset($this->config['support'][$key]);
@@ -141,6 +159,9 @@ class ValidatingArrayLoader implements LoaderInterface
                 unset($this->config['support']);
             }
         }
+
+        $unboundConstraint = new Constraint('=', $this->versionParser->normalize('dev-master'));
+        $stableConstraint = new Constraint('=', '1.0.0');
 
         foreach (array_keys(BasePackage::$supportedLinkTypes) as $linkType) {
             if ($this->validateArray($linkType) && isset($this->config[$linkType])) {
@@ -153,10 +174,29 @@ class ValidatingArrayLoader implements LoaderInterface
                         unset($this->config[$linkType][$package]);
                     } elseif ('self.version' !== $constraint) {
                         try {
-                            $this->versionParser->parseConstraints($constraint);
+                            $linkConstraint = $this->versionParser->parseConstraints($constraint);
                         } catch (\Exception $e) {
                             $this->errors[] = $linkType.'.'.$package.' : invalid version constraint ('.$e->getMessage().')';
                             unset($this->config[$linkType][$package]);
+                            continue;
+                        }
+
+                        // check requires for unbound constraints on non-platform packages
+                        if (
+                            ($this->flags & self::CHECK_UNBOUND_CONSTRAINTS)
+                            && 'require' === $linkType
+                            && $linkConstraint->matches($unboundConstraint)
+                            && !preg_match(PlatformRepository::PLATFORM_PACKAGE_REGEX, $package)
+                        ) {
+                            $this->warnings[] = $linkType.'.'.$package.' : unbound version constraints ('.$constraint.') should be avoided';
+                        } elseif (
+                            // check requires for exact constraints
+                            ($this->flags & self::CHECK_STRICT_CONSTRAINTS)
+                            && 'require' === $linkType
+                            && substr($linkConstraint, 0, 1) === '='
+                            && $stableConstraint->versionCompare($stableConstraint, $linkConstraint, '<=')
+                        ) {
+                            $this->warnings[] = $linkType.'.'.$package.' : exact version constraints ('.$constraint.') should be avoided if the package follows semantic versioning';
                         }
                     }
                 }
@@ -180,13 +220,27 @@ class ValidatingArrayLoader implements LoaderInterface
         }
 
         if ($this->validateArray('autoload') && !empty($this->config['autoload'])) {
-            $types = array('psr-0', 'classmap', 'files');
+            $types = array('psr-0', 'psr-4', 'classmap', 'files', 'exclude-from-classmap');
             foreach ($this->config['autoload'] as $type => $typeConfig) {
                 if (!in_array($type, $types)) {
                     $this->errors[] = 'autoload : invalid value ('.$type.'), must be one of '.implode(', ', $types);
                     unset($this->config['autoload'][$type]);
                 }
+                if ($type === 'psr-4') {
+                    foreach ($typeConfig as $namespace => $dirs) {
+                        if ($namespace !== '' && '\\' !== substr($namespace, -1)) {
+                            $this->errors[] = 'autoload.psr-4 : invalid value ('.$namespace.'), namespaces must end with a namespace separator, should be '.$namespace.'\\\\';
+                        }
+                    }
+                }
             }
+        }
+
+        if (!empty($this->config['autoload']['psr-4']) && !empty($this->config['target-dir'])) {
+            $this->errors[] = 'target-dir : this can not be used together with the autoload.psr-4 setting, remove target-dir to upgrade to psr-4';
+            // Unset the psr-4 setting, since unsetting target-dir might
+            // interfere with other settings.
+            unset($this->config['autoload']['psr-4']);
         }
 
         // TODO validate dist
@@ -196,6 +250,7 @@ class ValidatingArrayLoader implements LoaderInterface
         // TODO validate package repositories' packages using this recursively
 
         $this->validateFlatArray('include-path');
+        $this->validateArray('transport-options');
 
         // branch alias validation
         if (isset($this->config['extra']['branch-alias'])) {
@@ -215,6 +270,17 @@ class ValidatingArrayLoader implements LoaderInterface
                     $validatedTargetBranch = $this->versionParser->normalizeBranch(substr($targetBranch, 0, -4));
                     if ('-dev' !== substr($validatedTargetBranch, -4)) {
                         $this->warnings[] = 'extra.branch-alias.'.$sourceBranch.' : the target branch ('.$targetBranch.') must be a parseable number like 2.0-dev';
+                        unset($this->config['extra']['branch-alias'][$sourceBranch]);
+
+                        continue;
+                    }
+
+                    // If using numeric aliases ensure the alias is a valid subversion
+                    if (($sourcePrefix = $this->versionParser->parseNumericAliasPrefix($sourceBranch))
+                        && ($targetPrefix = $this->versionParser->parseNumericAliasPrefix($targetBranch))
+                        && (stripos($targetPrefix, $sourcePrefix) !== 0)
+                    ) {
+                        $this->warnings[] = 'extra.branch-alias.'.$sourceBranch.' : the target branch ('.$targetBranch.') is not a valid numeric alias for this version';
                         unset($this->config['extra']['branch-alias'][$sourceBranch]);
                     }
                 }

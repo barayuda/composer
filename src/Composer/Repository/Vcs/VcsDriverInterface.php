@@ -12,6 +12,7 @@
 
 namespace Composer\Repository\Vcs;
 
+use Composer\Config;
 use Composer\IO\IOInterface;
 
 /**
@@ -31,6 +32,23 @@ interface VcsDriverInterface
      * @return array  containing all infos from the composer.json file
      */
     public function getComposerInformation($identifier);
+
+    /**
+     * Return the content of $file or null if the file does not exist.
+     *
+     * @param  string $file
+     * @param  string $identifier
+     * @return string
+     */
+    public function getFileContent($file, $identifier);
+
+    /**
+     * Get the changedate for $identifier.
+     *
+     * @param  string    $identifier
+     * @return \DateTime
+     */
+    public function getChangeDate($identifier);
 
     /**
      * Return the root identifier (trunk, master, default/tip ..)
@@ -76,18 +94,24 @@ interface VcsDriverInterface
      * Return true if the repository has a composer file for a given identifier,
      * false otherwise.
      *
-     * @param  string  $identifier Any identifier to a specific branch/tag/commit
-     * @return boolean Whether the repository has a composer file for a given identifier.
+     * @param  string $identifier Any identifier to a specific branch/tag/commit
+     * @return bool   Whether the repository has a composer file for a given identifier.
      */
     public function hasComposerFile($identifier);
 
     /**
+     * Performs any cleanup necessary as the driver is not longer needed
+     */
+    public function cleanup();
+
+    /**
      * Checks if this driver can handle a given url
      *
-     * @param  IOInterface $io   IO instance
-     * @param  string      $url
-     * @param  bool        $deep unless true, only shallow checks (url matching typically) should be done
+     * @param  IOInterface $io     IO instance
+     * @param  Config      $config current $config
+     * @param  string      $url    URL to validate/check
+     * @param  bool        $deep   unless true, only shallow checks (url matching typically) should be done
      * @return bool
      */
-    public static function supports(IOInterface $io, $url, $deep = false);
+    public static function supports(IOInterface $io, Config $config, $url, $deep = false);
 }

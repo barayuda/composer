@@ -13,6 +13,8 @@
 namespace Composer\Downloader;
 
 use Composer\Package\PackageInterface;
+use Symfony\Component\Finder\Finder;
+use Composer\IO\IOInterface;
 
 /**
  * Base downloader for archives
@@ -26,50 +28,69 @@ abstract class ArchiveDownloader extends FileDownloader
     /**
      * {@inheritDoc}
      */
-    public function download(PackageInterface $package, $path)
+    public function download(PackageInterface $package, $path, $output = true)
     {
-        parent::download($package, $path);
-
-        $fileName = $this->getFileName($package, $path);
-        if ($this->io->isVerbose()) {
-            $this->io->write('    Extracting archive');
-        }
-
         $temporaryDir = $this->config->get('vendor-dir').'/composer/'.substr(md5(uniqid('', true)), 0, 8);
-        try {
-            $this->filesystem->ensureDirectoryExists($temporaryDir);
+        $retries = 3;
+        while ($retries--) {
+            $fileName = parent::download($package, $path, $output);
+
+            $this->io->writeError(' Extracting archive', false, IOInterface::VERBOSE);
+
             try {
-                $this->extract($fileName, $temporaryDir);
+                $this->filesystem->ensureDirectoryExists($temporaryDir);
+                try {
+                    $this->extract($fileName, $temporaryDir);
+                } catch (\Exception $e) {
+                    // remove cache if the file was corrupted
+                    parent::clearLastCacheWrite($package);
+                    throw $e;
+                }
+
+                $this->filesystem->unlink($fileName);
+
+                $contentDir = $this->getFolderContent($temporaryDir);
+
+                // only one dir in the archive, extract its contents out of it
+                if (1 === count($contentDir) && is_dir(reset($contentDir))) {
+                    $contentDir = $this->getFolderContent((string) reset($contentDir));
+                }
+
+                // move files back out of the temp dir
+                foreach ($contentDir as $file) {
+                    $file = (string) $file;
+                    $this->filesystem->rename($file, $path . '/' . basename($file));
+                }
+
+                $this->filesystem->removeDirectory($temporaryDir);
+                if ($this->filesystem->isDirEmpty($this->config->get('vendor-dir').'/composer/')) {
+                    $this->filesystem->removeDirectory($this->config->get('vendor-dir').'/composer/');
+                }
+                if ($this->filesystem->isDirEmpty($this->config->get('vendor-dir'))) {
+                    $this->filesystem->removeDirectory($this->config->get('vendor-dir'));
+                }
             } catch (\Exception $e) {
-                // remove cache if the file was corrupted
-                parent::clearCache($package, $path);
+                // clean up
+                $this->filesystem->removeDirectory($path);
+                $this->filesystem->removeDirectory($temporaryDir);
+
+                // retry downloading if we have an invalid zip file
+                if ($retries && $e instanceof \UnexpectedValueException && class_exists('ZipArchive') && $e->getCode() === \ZipArchive::ER_NOZIP) {
+                    $this->io->writeError('');
+                    if ($this->io->isDebug()) {
+                        $this->io->writeError('    Invalid zip file ('.$e->getMessage().'), retrying...');
+                    } else {
+                        $this->io->writeError('    Invalid zip file, retrying...');
+                    }
+                    usleep(500000);
+                    continue;
+                }
+
                 throw $e;
             }
 
-            unlink($fileName);
-
-            // get file list
-            $contentDir = $this->listFiles($temporaryDir);
-
-            // only one dir in the archive, extract its contents out of it
-            if (1 === count($contentDir) && !is_file($contentDir[0])) {
-                $contentDir = $this->listFiles($contentDir[0]);
-            }
-
-            // move files back out of the temp dir
-            foreach ($contentDir as $file) {
-                $this->filesystem->rename($file, $path . '/' . basename($file));
-            }
-
-            $this->filesystem->removeDirectory($temporaryDir);
-        } catch (\Exception $e) {
-            // clean up
-            $this->filesystem->removeDirectory($path);
-            $this->filesystem->removeDirectory($temporaryDir);
-            throw $e;
+            break;
         }
-
-        $this->io->write('');
     }
 
     /**
@@ -96,18 +117,10 @@ abstract class ArchiveDownloader extends FileDownloader
                 // update api archives to the proper reference
                 $url = 'https://api.github.com/repos/' . $match[1] . '/'. $match[2] . '/' . $match[3] . 'ball/' . $package->getDistReference();
             }
-        }
-
-        if (!extension_loaded('openssl') && (0 === strpos($url, 'https:') || 0 === strpos($url, 'http://github.com'))) {
-            // bypass https for github if openssl is disabled
-            if (preg_match('{^https://api\.github\.com/repos/([^/]+/[^/]+)/(zip|tar)ball/([^/]+)$}i', $url, $match)) {
-                $url = 'http://nodeload.github.com/'.$match[1].'/'.$match[2].'/'.$match[3];
-            } elseif (preg_match('{^https://github\.com/([^/]+/[^/]+)/(zip|tar)ball/([^/]+)$}i', $url, $match)) {
-                $url = 'http://nodeload.github.com/'.$match[1].'/'.$match[2].'/'.$match[3];
-            } elseif (preg_match('{^https://github\.com/([^/]+/[^/]+)/archive/([^/]+)\.(zip|tar\.gz)$}i', $url, $match)) {
-                $url = 'http://nodeload.github.com/'.$match[1].'/'.$match[3].'/'.$match[2];
-            } else {
-                throw new \RuntimeException('You must enable the openssl extension to download files via https');
+        } elseif ($package->getDistReference() && strpos($url, 'bitbucket.org')) {
+            if (preg_match('{^https?://(?:www\.)?bitbucket\.org/([^/]+)/([^/]+)/get/(.+)\.(zip|tar\.gz|tar\.bz2)$}i', $url, $match)) {
+                // update Bitbucket archives to the proper reference
+                $url = 'https://bitbucket.org/' . $match[1] . '/'. $match[2] . '/get/' . $package->getDistReference() . '.' . $match[4];
             }
         }
 
@@ -125,14 +138,19 @@ abstract class ArchiveDownloader extends FileDownloader
     abstract protected function extract($file, $path);
 
     /**
-     * Returns the list of files in a directory including dotfiles
+     * Returns the folder content, excluding dotfiles
+     *
+     * @param  string         $dir Directory
+     * @return \SplFileInfo[]
      */
-    private function listFiles($dir)
+    private function getFolderContent($dir)
     {
-        $files = array_merge(glob($dir . '/.*'), glob($dir . '/*'));
+        $finder = Finder::create()
+            ->ignoreVCS(false)
+            ->ignoreDotFiles(false)
+            ->depth(0)
+            ->in($dir);
 
-        return array_values(array_filter($files, function ($el) {
-            return basename($el) !== '.' && basename($el) !== '..';
-        }));
+        return iterator_to_array($finder);
     }
 }

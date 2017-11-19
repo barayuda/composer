@@ -12,12 +12,10 @@
 
 namespace Composer\Script;
 
-use Composer\Composer;
-
 /**
  * The Command Event.
  *
- * @author François Pluchino <francois.pluchino@opendisplay.com>
+ * @deprecated use Composer\Script\Event instead
  */
 class CommandEvent extends Event
 {

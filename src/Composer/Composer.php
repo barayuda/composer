@@ -16,17 +16,22 @@ use Composer\Package\RootPackageInterface;
 use Composer\Package\Locker;
 use Composer\Repository\RepositoryManager;
 use Composer\Installer\InstallationManager;
+use Composer\Plugin\PluginManager;
 use Composer\Downloader\DownloadManager;
-use Composer\Script\EventDispatcher;
+use Composer\EventDispatcher\EventDispatcher;
 use Composer\Autoload\AutoloadGenerator;
+use Composer\Package\Archiver\ArchiveManager;
 
 /**
  * @author Jordi Boggiano <j.boggiano@seld.be>
  * @author Konstantin Kudryashiv <ever.zet@gmail.com>
+ * @author Nils Adermann <naderman@naderman.de>
  */
 class Composer
 {
     const VERSION = '@package_version@';
+    const BRANCH_ALIAS_VERSION = '@package_branch_alias_version@';
+    const RELEASE_DATE = '@release_date@';
 
     /**
      * @var Package\RootPackageInterface
@@ -54,12 +59,17 @@ class Composer
     private $installationManager;
 
     /**
+     * @var Plugin\PluginManager
+     */
+    private $pluginManager;
+
+    /**
      * @var Config
      */
     private $config;
 
     /**
-     * @var Script\EventDispatcher
+     * @var EventDispatcher
      */
     private $eventDispatcher;
 
@@ -67,6 +77,11 @@ class Composer
      * @var Autoload\AutoloadGenerator
      */
     private $autoloadGenerator;
+
+    /**
+     * @var ArchiveManager
+     */
+    private $archiveManager;
 
     /**
      * @param  Package\RootPackageInterface $package
@@ -150,6 +165,22 @@ class Composer
     }
 
     /**
+     * @param ArchiveManager $manager
+     */
+    public function setArchiveManager(ArchiveManager $manager)
+    {
+        $this->archiveManager = $manager;
+    }
+
+    /**
+     * @return ArchiveManager
+     */
+    public function getArchiveManager()
+    {
+        return $this->archiveManager;
+    }
+
+    /**
      * @param Installer\InstallationManager $manager
      */
     public function setInstallationManager(InstallationManager $manager)
@@ -166,7 +197,23 @@ class Composer
     }
 
     /**
-     * @param Script\EventDispatcher $eventDispatcher
+     * @param Plugin\PluginManager $manager
+     */
+    public function setPluginManager(PluginManager $manager)
+    {
+        $this->pluginManager = $manager;
+    }
+
+    /**
+     * @return Plugin\PluginManager
+     */
+    public function getPluginManager()
+    {
+        return $this->pluginManager;
+    }
+
+    /**
+     * @param EventDispatcher $eventDispatcher
      */
     public function setEventDispatcher(EventDispatcher $eventDispatcher)
     {
@@ -174,7 +221,7 @@ class Composer
     }
 
     /**
-     * @return Script\EventDispatcher
+     * @return EventDispatcher
      */
     public function getEventDispatcher()
     {

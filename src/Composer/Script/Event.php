@@ -14,19 +14,16 @@ namespace Composer\Script;
 
 use Composer\Composer;
 use Composer\IO\IOInterface;
+use Composer\EventDispatcher\Event as BaseEvent;
 
 /**
- * The base event class
+ * The script event class
  *
  * @author François Pluchino <francois.pluchino@opendisplay.com>
+ * @author Nils Adermann <naderman@naderman.de>
  */
-class Event
+class Event extends BaseEvent
 {
-    /**
-     * @var string This event's name
-     */
-    private $name;
-
     /**
      * @var Composer The composer instance
      */
@@ -38,7 +35,7 @@ class Event
     private $io;
 
     /**
-     * @var boolean Dev mode flag
+     * @var bool Dev mode flag
      */
     private $devMode;
 
@@ -48,24 +45,16 @@ class Event
      * @param string      $name     The event name
      * @param Composer    $composer The composer object
      * @param IOInterface $io       The IOInterface object
-     * @param boolean     $devMode  Whether or not we are in dev mode
+     * @param bool        $devMode  Whether or not we are in dev mode
+     * @param array       $args     Arguments passed by the user
+     * @param array       $flags    Optional flags to pass data not as argument
      */
-    public function __construct($name, Composer $composer, IOInterface $io, $devMode = false)
+    public function __construct($name, Composer $composer, IOInterface $io, $devMode = false, array $args = array(), array $flags = array())
     {
-        $this->name = $name;
+        parent::__construct($name, $args, $flags);
         $this->composer = $composer;
         $this->io = $io;
         $this->devMode = $devMode;
-    }
-
-    /**
-     * Returns the event's name.
-     *
-     * @return string The event name
-     */
-    public function getName()
-    {
-        return $this->name;
     }
 
     /**
@@ -91,7 +80,7 @@ class Event
     /**
      * Return the dev mode flag
      *
-     * @return boolean
+     * @return bool
      */
     public function isDevMode()
     {

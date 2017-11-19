@@ -13,7 +13,7 @@
 namespace Composer\Downloader;
 
 use Composer\Package\PackageInterface;
-use Composer\Downloader\DownloaderInterface;
+use Composer\IO\IOInterface;
 use Composer\Util\Filesystem;
 
 /**
@@ -23,19 +23,23 @@ use Composer\Util\Filesystem;
  */
 class DownloadManager
 {
+    private $io;
     private $preferDist = false;
     private $preferSource = false;
+    private $packagePreferences = array();
     private $filesystem;
-    private $downloaders  = array();
+    private $downloaders = array();
 
     /**
      * Initializes download manager.
      *
+     * @param IOInterface     $io           The Input Output Interface
      * @param bool            $preferSource prefer downloading from source
      * @param Filesystem|null $filesystem   custom Filesystem object
      */
-    public function __construct($preferSource = false, Filesystem $filesystem = null)
+    public function __construct(IOInterface $io, $preferSource = false, Filesystem $filesystem = null)
     {
+        $this->io = $io;
         $this->preferSource = $preferSource;
         $this->filesystem = $filesystem ?: new Filesystem();
     }
@@ -62,6 +66,19 @@ class DownloadManager
     public function setPreferDist($preferDist)
     {
         $this->preferDist = $preferDist;
+
+        return $this;
+    }
+
+    /**
+     * Sets fine tuned preference settings for package level source/dist selection.
+     *
+     * @param  array           $preferences array of preferences by package patterns
+     * @return DownloadManager
+     */
+    public function setPreferences(array $preferences)
+    {
+        $this->packagePreferences = $preferences;
 
         return $this;
     }
@@ -100,17 +117,15 @@ class DownloadManager
     /**
      * Returns downloader for a specific installation type.
      *
-     * @param string $type installation type
-     *
-     * @return DownloaderInterface
-     *
+     * @param  string                    $type installation type
      * @throws \InvalidArgumentException if downloader for provided type is not registered
+     * @return DownloaderInterface
      */
     public function getDownloader($type)
     {
         $type = strtolower($type);
         if (!isset($this->downloaders[$type])) {
-            throw new \InvalidArgumentException('Unknown downloader type: '.$type);
+            throw new \InvalidArgumentException(sprintf('Unknown downloader type: %s. Available types: %s.', $type, implode(', ', array_keys($this->downloaders))));
         }
 
         return $this->downloaders[$type];
@@ -119,17 +134,19 @@ class DownloadManager
     /**
      * Returns downloader for already installed package.
      *
-     * @param PackageInterface $package package instance
-     *
-     * @return DownloaderInterface
-     *
+     * @param  PackageInterface          $package package instance
      * @throws \InvalidArgumentException if package has no installation source specified
      * @throws \LogicException           if specific downloader used to load package with
-     *                                          wrong type
+     *                                           wrong type
+     * @return DownloaderInterface|null
      */
     public function getDownloaderForInstalledPackage(PackageInterface $package)
     {
         $installationSource = $package->getInstallationSource();
+
+        if ('metapackage' === $package->getType()) {
+            return;
+        }
 
         if ('dist' === $installationSource) {
             $downloader = $this->getDownloader($package->getDistType());
@@ -159,25 +176,56 @@ class DownloadManager
      * @param bool             $preferSource prefer installation from source
      *
      * @throws \InvalidArgumentException if package have no urls to download from
+     * @throws \RuntimeException
      */
     public function download(PackageInterface $package, $targetDir, $preferSource = null)
     {
         $preferSource = null !== $preferSource ? $preferSource : $this->preferSource;
-        $sourceType   = $package->getSourceType();
-        $distType     = $package->getDistType();
+        $sourceType = $package->getSourceType();
+        $distType = $package->getDistType();
 
-        if ((!$package->isDev() || $this->preferDist || !$sourceType) && !($preferSource && $sourceType) && $distType) {
-            $package->setInstallationSource('dist');
-        } elseif ($sourceType) {
-            $package->setInstallationSource('source');
-        } else {
+        $sources = array();
+        if ($sourceType) {
+            $sources[] = 'source';
+        }
+        if ($distType) {
+            $sources[] = 'dist';
+        }
+
+        if (empty($sources)) {
             throw new \InvalidArgumentException('Package '.$package.' must have a source or dist specified');
+        }
+
+        if (!$preferSource && ($this->preferDist || 'dist' === $this->resolvePackageInstallPreference($package))) {
+            $sources = array_reverse($sources);
         }
 
         $this->filesystem->ensureDirectoryExists($targetDir);
 
-        $downloader = $this->getDownloaderForInstalledPackage($package);
-        $downloader->download($package, $targetDir);
+        foreach ($sources as $i => $source) {
+            if (isset($e)) {
+                $this->io->writeError('    <warning>Now trying to download from ' . $source . '</warning>');
+            }
+            $package->setInstallationSource($source);
+            try {
+                $downloader = $this->getDownloaderForInstalledPackage($package);
+                if ($downloader) {
+                    $downloader->download($package, $targetDir);
+                }
+                break;
+            } catch (\RuntimeException $e) {
+                if ($i === count($sources) - 1) {
+                    throw $e;
+                }
+
+                $this->io->writeError(
+                    '    <warning>Failed to download '.
+                    $package->getPrettyName().
+                    ' from ' . $source . ': '.
+                    $e->getMessage().'</warning>'
+                );
+            }
+        }
     }
 
     /**
@@ -192,14 +240,18 @@ class DownloadManager
     public function update(PackageInterface $initial, PackageInterface $target, $targetDir)
     {
         $downloader = $this->getDownloaderForInstalledPackage($initial);
+        if (!$downloader) {
+            return;
+        }
+
         $installationSource = $initial->getInstallationSource();
 
         if ('dist' === $installationSource) {
             $initialType = $initial->getDistType();
-            $targetType  = $target->getDistType();
+            $targetType = $target->getDistType();
         } else {
             $initialType = $initial->getSourceType();
-            $targetType  = $target->getSourceType();
+            $targetType = $target->getSourceType();
         }
 
         // upgrading from a dist stable package to a dev package, force source reinstall
@@ -212,11 +264,23 @@ class DownloadManager
 
         if ($initialType === $targetType) {
             $target->setInstallationSource($installationSource);
-            $downloader->update($initial, $target, $targetDir);
-        } else {
-            $downloader->remove($initial, $targetDir);
-            $this->download($target, $targetDir, 'source' === $installationSource);
+            try {
+                $downloader->update($initial, $target, $targetDir);
+
+                return;
+            } catch (\RuntimeException $e) {
+                if (!$this->io->isInteractive()) {
+                    throw $e;
+                }
+                $this->io->writeError('<error>    Update failed ('.$e->getMessage().')</error>');
+                if (!$this->io->askConfirmation('    Would you like to try reinstalling the package instead [<comment>yes</comment>]? ', true)) {
+                    throw $e;
+                }
+            }
         }
+
+        $downloader->remove($initial, $targetDir);
+        $this->download($target, $targetDir, 'source' === $installationSource);
     }
 
     /**
@@ -228,6 +292,31 @@ class DownloadManager
     public function remove(PackageInterface $package, $targetDir)
     {
         $downloader = $this->getDownloaderForInstalledPackage($package);
-        $downloader->remove($package, $targetDir);
+        if ($downloader) {
+            $downloader->remove($package, $targetDir);
+        }
+    }
+
+    /**
+     * Determines the install preference of a package
+     *
+     * @param PackageInterface $package package instance
+     *
+     * @return string
+     */
+    protected function resolvePackageInstallPreference(PackageInterface $package)
+    {
+        foreach ($this->packagePreferences as $pattern => $preference) {
+            $pattern = '{^'.str_replace('\\*', '.*', preg_quote($pattern)).'$}i';
+            if (preg_match($pattern, $package->getName())) {
+                if ('dist' === $preference || (!$package->isDev() && 'auto' === $preference)) {
+                    return 'dist';
+                }
+
+                return 'source';
+            }
+        }
+
+        return $package->isDev() ? 'source' : 'dist';
     }
 }

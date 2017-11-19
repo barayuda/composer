@@ -17,7 +17,7 @@ namespace Composer\IO;
  *
  * @author Christophe Coevoet <stof@notk.org>
  */
-class NullIO implements IOInterface
+class NullIO extends BaseIO
 {
     /**
      * {@inheritDoc}
@@ -62,14 +62,28 @@ class NullIO implements IOInterface
     /**
      * {@inheritDoc}
      */
-    public function write($messages, $newline = true)
+    public function write($messages, $newline = true, $verbosity = self::NORMAL)
     {
     }
 
     /**
      * {@inheritDoc}
      */
-    public function overwrite($messages, $newline = true, $size = 80)
+    public function writeError($messages, $newline = true, $verbosity = self::NORMAL)
+    {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function overwrite($messages, $newline = true, $size = 80, $verbosity = self::NORMAL)
+    {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function overwriteError($messages, $newline = true, $size = 80, $verbosity = self::NORMAL)
     {
     }
 
@@ -108,31 +122,8 @@ class NullIO implements IOInterface
     /**
      * {@inheritDoc}
      */
-    public function getAuthentications()
+    public function select($question, $choices, $default, $attempts = false, $errorMessage = 'Value "%s" is invalid', $multiselect = false)
     {
-        return array();
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    public function hasAuthentication($repositoryName)
-    {
-        return false;
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    public function getAuthentication($repositoryName)
-    {
-        return array('username' => null, 'password' => null);
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    public function setAuthentication($repositoryName, $username, $password = null)
-    {
+        return $default;
     }
 }

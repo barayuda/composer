@@ -14,6 +14,7 @@ namespace Composer\Downloader;
 
 use Composer\Package\PackageInterface;
 use Composer\Util\Svn as SvnUtil;
+use Composer\Repository\VcsRepository;
 
 /**
  * @author Ben Bieker <mail@ben-bieker.de>
@@ -21,37 +22,58 @@ use Composer\Util\Svn as SvnUtil;
  */
 class SvnDownloader extends VcsDownloader
 {
+    protected $cacheCredentials = true;
+
     /**
      * {@inheritDoc}
      */
-    public function doDownload(PackageInterface $package, $path)
+    public function doDownload(PackageInterface $package, $path, $url)
     {
-        $url =  $package->getSourceUrl();
-        $ref =  $package->getSourceReference();
+        SvnUtil::cleanEnv();
+        $ref = $package->getSourceReference();
 
-        $this->io->write("    Checking out ".$package->getSourceReference());
+        $repo = $package->getRepository();
+        if ($repo instanceof VcsRepository) {
+            $repoConfig = $repo->getRepoConfig();
+            if (array_key_exists('svn-cache-credentials', $repoConfig)) {
+                $this->cacheCredentials = (bool) $repoConfig['svn-cache-credentials'];
+            }
+        }
+
+        $this->io->writeError(" Checking out ".$package->getSourceReference());
         $this->execute($url, "svn co", sprintf("%s/%s", $url, $ref), null, $path);
     }
 
     /**
      * {@inheritDoc}
      */
-    public function doUpdate(PackageInterface $initial, PackageInterface $target, $path)
+    public function doUpdate(PackageInterface $initial, PackageInterface $target, $path, $url)
     {
-        $url = $target->getSourceUrl();
+        SvnUtil::cleanEnv();
         $ref = $target->getSourceReference();
 
-        $this->io->write("    Checking out " . $ref);
-        $this->execute($url, "svn switch", sprintf("%s/%s", $url, $ref), $path);
+        if (!$this->hasMetadataRepository($path)) {
+            throw new \RuntimeException('The .svn directory is missing from '.$path.', see https://getcomposer.org/commit-deps for more information');
+        }
+
+        $flags = "";
+        if (0 === $this->process->execute('svn --version', $output)) {
+            if (preg_match('{(\d+(?:\.\d+)+)}', $output, $match) && version_compare($match[1], '1.7.0', '>=')) {
+                $flags .= ' --ignore-ancestry';
+            }
+        }
+
+        $this->io->writeError(" Checking out " . $ref);
+        $this->execute($url, "svn switch" . $flags, sprintf("%s/%s", $url, $ref), $path);
     }
 
     /**
      * {@inheritDoc}
      */
-    public function getLocalChanges($path)
+    public function getLocalChanges(PackageInterface $package, $path)
     {
-        if (!is_dir($path.'/.svn')) {
-            return;
+        if (!$this->hasMetadataRepository($path)) {
+            return null;
         }
 
         $this->process->execute('svn status --ignore-externals', $output, $path);
@@ -73,7 +95,8 @@ class SvnDownloader extends VcsDownloader
      */
     protected function execute($baseUrl, $command, $url, $cwd = null, $path = null)
     {
-        $util = new SvnUtil($baseUrl, $this->io);
+        $util = new SvnUtil($baseUrl, $this->io, $this->config);
+        $util->setCacheCredentials($this->cacheCredentials);
         try {
             return $util->execute($command, $url, $cwd, $path, $this->io->isVerbose());
         } catch (\RuntimeException $e) {
@@ -86,9 +109,9 @@ class SvnDownloader extends VcsDownloader
     /**
      * {@inheritDoc}
      */
-    protected function cleanChanges($path, $update)
+    protected function cleanChanges(PackageInterface $package, $path, $update)
     {
-        if (!$changes = $this->getLocalChanges($path)) {
+        if (!$changes = $this->getLocalChanges($package, $path)) {
             return;
         }
 
@@ -97,16 +120,16 @@ class SvnDownloader extends VcsDownloader
                 return $this->discardChanges($path);
             }
 
-            return parent::cleanChanges($path, $update);
+            return parent::cleanChanges($package, $path, $update);
         }
 
         $changes = array_map(function ($elem) {
             return '    '.$elem;
         }, preg_split('{\s*\r?\n\s*}', $changes));
-        $this->io->write('    <error>The package has modified files:</error>');
-        $this->io->write(array_slice($changes, 0, 10));
+        $this->io->writeError('    <error>The package has modified files:</error>');
+        $this->io->writeError(array_slice($changes, 0, 10));
         if (count($changes) > 10) {
-            $this->io->write('    <info>'.count($changes) - 10 . ' more files modified, choose "v" to view the full list</info>');
+            $this->io->writeError('    <info>'.count($changes) - 10 . ' more files modified, choose "v" to view the full list</info>');
         }
 
         while (true) {
@@ -119,12 +142,12 @@ class SvnDownloader extends VcsDownloader
                     throw new \RuntimeException('Update aborted');
 
                 case 'v':
-                    $this->io->write($changes);
+                    $this->io->writeError($changes);
                     break;
 
                 case '?':
                 default:
-                    $this->io->write(array(
+                    $this->io->writeError(array(
                         '    y - discard changes and apply the '.($update ? 'update' : 'uninstall'),
                         '    n - abort the '.($update ? 'update' : 'uninstall').' and let you manually clean things up',
                         '    v - view modified files',
@@ -140,14 +163,20 @@ class SvnDownloader extends VcsDownloader
      */
     protected function getCommitLogs($fromReference, $toReference, $path)
     {
-        // strip paths from references and only keep the actual revision
-        $fromRevision = preg_replace('{.*@(\d+)$}', '$1', $fromReference);
-        $toRevision = preg_replace('{.*@(\d+)$}', '$1', $toReference);
+        if (preg_match('{.*@(\d+)$}', $fromReference) && preg_match('{.*@(\d+)$}', $toReference)) {
+            // strip paths from references and only keep the actual revision
+            $fromRevision = preg_replace('{.*@(\d+)$}', '$1', $fromReference);
+            $toRevision = preg_replace('{.*@(\d+)$}', '$1', $toReference);
 
-        $command = sprintf('svn log -r%s:%s --incremental', $fromRevision, $toRevision);
+            $command = sprintf('svn log -r%s:%s --incremental', $fromRevision, $toRevision);
 
-        if (0 !== $this->process->execute($command, $output, $path)) {
-            throw new \RuntimeException('Failed to execute ' . $command . "\n\n" . $this->process->getErrorOutput());
+            if (0 !== $this->process->execute($command, $output, $path)) {
+                throw new \RuntimeException(
+                    'Failed to execute ' . $command . "\n\n" . $this->process->getErrorOutput()
+                );
+            }
+        } else {
+            $output = "Could not retrieve changes between $fromReference and $toReference due to missing revision information";
         }
 
         return $output;
@@ -158,5 +187,13 @@ class SvnDownloader extends VcsDownloader
         if (0 !== $this->process->execute('svn revert -R .', $output, $path)) {
             throw new \RuntimeException("Could not reset changes\n\n:".$this->process->getErrorOutput());
         }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    protected function hasMetadataRepository($path)
+    {
+        return is_dir($path.'/.svn');
     }
 }

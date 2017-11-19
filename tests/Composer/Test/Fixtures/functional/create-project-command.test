@@ -1,12 +1,4 @@
 --RUN--
 create-project seld/jsonlint %testDir% 1.0.0 --prefer-source -n
---EXPECT--
-Installing seld/jsonlint (1.0.0)
-  - Installing seld/jsonlint (1.0.0)
-    Cloning 1.0.0
-
-Created project in %testDir%
-Loading composer repositories with package information
-Installing dependencies (including require-dev)
-Nothing to install or update
-Generating autoload files
+--EXPECT-ERROR-REGEX--
+{Installing seld/jsonlint \(1.0.0\): Cloning [a-f0-9]{10}( from cache)?}

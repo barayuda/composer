@@ -1,7 +1,20 @@
 <?php
+
+/*
+ * This file is part of Composer.
+ *
+ * (c) Nils Adermann <naderman@naderman.de>
+ *     Jordi Boggiano <j.boggiano@seld.be>
+ *
+ * For the full copyright and license information, please view the LICENSE
+ * file that was distributed with this source code.
+ */
+
 namespace Composer\Test\Util;
 
+use Composer\Config;
 use Composer\IO\NullIO;
+use Composer\Util\Platform;
 use Composer\Util\Svn;
 
 class SvnTest extends \PHPUnit_Framework_TestCase
@@ -16,7 +29,7 @@ class SvnTest extends \PHPUnit_Framework_TestCase
      */
     public function testCredentials($url, $expect)
     {
-        $svn = new Svn($url, new NullIO);
+        $svn = new Svn($url, new NullIO, new Config());
         $reflMethod = new \ReflectionMethod('Composer\\Util\\Svn', 'getCredentialString');
         $reflMethod->setAccessible(true);
 
@@ -41,7 +54,7 @@ class SvnTest extends \PHPUnit_Framework_TestCase
     {
         $url = 'http://svn.example.org';
 
-        $svn = new Svn($url, new NullIO());
+        $svn = new Svn($url, new NullIO(), new Config());
         $reflMethod = new \ReflectionMethod('Composer\\Util\\Svn', 'getCommand');
         $reflMethod->setAccessible(true);
 
@@ -51,12 +64,74 @@ class SvnTest extends \PHPUnit_Framework_TestCase
         );
     }
 
+    public function testCredentialsFromConfig()
+    {
+        $url = 'http://svn.apache.org';
+
+        $config = new Config();
+        $config->merge(array(
+            'config' => array(
+                'http-basic' => array(
+                    'svn.apache.org' => array('username' => 'foo', 'password' => 'bar'),
+                ),
+            ),
+        ));
+
+        $svn = new Svn($url, new NullIO, $config);
+        $reflMethod = new \ReflectionMethod('Composer\\Util\\Svn', 'getCredentialString');
+        $reflMethod->setAccessible(true);
+
+        $this->assertEquals($this->getCmd(" --username 'foo' --password 'bar' "), $reflMethod->invoke($svn));
+    }
+
+    public function testCredentialsFromConfigWithCacheCredentialsTrue()
+    {
+        $url = 'http://svn.apache.org';
+
+        $config = new Config();
+        $config->merge(
+            array(
+                'config' => array(
+                    'http-basic' => array(
+                        'svn.apache.org' => array('username' => 'foo', 'password' => 'bar'),
+                    ),
+                ),
+            )
+        );
+
+        $svn = new Svn($url, new NullIO, $config);
+        $svn->setCacheCredentials(true);
+        $reflMethod = new \ReflectionMethod('Composer\\Util\\Svn', 'getCredentialString');
+        $reflMethod->setAccessible(true);
+
+        $this->assertEquals($this->getCmd(" --username 'foo' --password 'bar' "), $reflMethod->invoke($svn));
+    }
+
+    public function testCredentialsFromConfigWithCacheCredentialsFalse()
+    {
+        $url = 'http://svn.apache.org';
+
+        $config = new Config();
+        $config->merge(
+            array(
+                'config' => array(
+                    'http-basic' => array(
+                        'svn.apache.org' => array('username' => 'foo', 'password' => 'bar'),
+                    ),
+                ),
+            )
+        );
+
+        $svn = new Svn($url, new NullIO, $config);
+        $svn->setCacheCredentials(false);
+        $reflMethod = new \ReflectionMethod('Composer\\Util\\Svn', 'getCredentialString');
+        $reflMethod->setAccessible(true);
+
+        $this->assertEquals($this->getCmd(" --no-auth-cache --username 'foo' --password 'bar' "), $reflMethod->invoke($svn));
+    }
+
     private function getCmd($cmd)
     {
-        if (defined('PHP_WINDOWS_VERSION_BUILD')) {
-            return strtr($cmd, "'", '"');
-        }
-
-        return $cmd;
+        return Platform::isWindows() ? strtr($cmd, "'", '"') : $cmd;
     }
 }

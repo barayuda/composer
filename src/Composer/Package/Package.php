@@ -13,6 +13,7 @@
 namespace Composer\Package;
 
 use Composer\Package\Version\VersionParser;
+use Composer\Util\ComposerMirror;
 
 /**
  * Core package definitions that are needed to resolve dependencies and install packages
@@ -27,10 +28,12 @@ class Package extends BasePackage
     protected $sourceType;
     protected $sourceUrl;
     protected $sourceReference;
+    protected $sourceMirrors;
     protected $distType;
     protected $distUrl;
     protected $distReference;
     protected $distSha1Checksum;
+    protected $distMirrors;
     protected $version;
     protected $prettyVersion;
     protected $releaseDate;
@@ -40,13 +43,19 @@ class Package extends BasePackage
     protected $stability;
     protected $notificationUrl;
 
+    /** @var Link[] */
     protected $requires = array();
+    /** @var Link[] */
     protected $conflicts = array();
+    /** @var Link[] */
     protected $provides = array();
+    /** @var Link[] */
     protected $replaces = array();
+    /** @var Link[] */
     protected $devRequires = array();
     protected $suggests = array();
     protected $autoload = array();
+    protected $devAutoload = array();
     protected $includePaths = array();
     protected $archiveExcludes = array();
 
@@ -217,6 +226,30 @@ class Package extends BasePackage
     }
 
     /**
+     * @param array|null $mirrors
+     */
+    public function setSourceMirrors($mirrors)
+    {
+        $this->sourceMirrors = $mirrors;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function getSourceMirrors()
+    {
+        return $this->sourceMirrors;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function getSourceUrls()
+    {
+        return $this->getUrls($this->sourceUrl, $this->sourceMirrors, $this->sourceReference, $this->sourceType, 'source');
+    }
+
+    /**
      * @param string $type
      */
     public function setDistType($type)
@@ -281,6 +314,30 @@ class Package extends BasePackage
     }
 
     /**
+     * @param array|null $mirrors
+     */
+    public function setDistMirrors($mirrors)
+    {
+        $this->distMirrors = $mirrors;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function getDistMirrors()
+    {
+        return $this->distMirrors;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function getDistUrls()
+    {
+        return $this->getUrls($this->distUrl, $this->distMirrors, $this->distReference, $this->distType, 'dist');
+    }
+
+    /**
      * {@inheritDoc}
      */
     public function getVersion()
@@ -317,7 +374,7 @@ class Package extends BasePackage
     /**
      * Set the required packages
      *
-     * @param array $requires A set of package links
+     * @param Link[] $requires A set of package links
      */
     public function setRequires(array $requires)
     {
@@ -335,7 +392,7 @@ class Package extends BasePackage
     /**
      * Set the conflicting packages
      *
-     * @param array $conflicts A set of package links
+     * @param Link[] $conflicts A set of package links
      */
     public function setConflicts(array $conflicts)
     {
@@ -353,7 +410,7 @@ class Package extends BasePackage
     /**
      * Set the provided virtual packages
      *
-     * @param array $provides A set of package links
+     * @param Link[] $provides A set of package links
      */
     public function setProvides(array $provides)
     {
@@ -371,7 +428,7 @@ class Package extends BasePackage
     /**
      * Set the packages this one replaces
      *
-     * @param array $replaces A set of package links
+     * @param Link[] $replaces A set of package links
      */
     public function setReplaces(array $replaces)
     {
@@ -389,7 +446,7 @@ class Package extends BasePackage
     /**
      * Set the recommended packages
      *
-     * @param array $devRequires A set of package links
+     * @param Link[] $devRequires A set of package links
      */
     public function setDevRequires(array $devRequires)
     {
@@ -438,6 +495,24 @@ class Package extends BasePackage
     public function getAutoload()
     {
         return $this->autoload;
+    }
+
+    /**
+     * Set the dev autoload mapping
+     *
+     * @param array $devAutoload Mapping of dev autoloading rules
+     */
+    public function setDevAutoload(array $devAutoload)
+    {
+        $this->devAutoload = $devAutoload;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function getDevAutoload()
+    {
+        return $this->devAutoload;
     }
 
     /**
@@ -492,5 +567,46 @@ class Package extends BasePackage
     public function getArchiveExcludes()
     {
         return $this->archiveExcludes;
+    }
+
+    /**
+     * Replaces current version and pretty version with passed values.
+     * It also sets stability.
+     *
+     * @param string $version       The package's normalized version
+     * @param string $prettyVersion The package's non-normalized version
+     */
+    public function replaceVersion($version, $prettyVersion)
+    {
+        $this->version = $version;
+        $this->prettyVersion = $prettyVersion;
+
+        $this->stability = VersionParser::parseStability($version);
+        $this->dev = $this->stability === 'dev';
+    }
+
+    protected function getUrls($url, $mirrors, $ref, $type, $urlType)
+    {
+        if (!$url) {
+            return array();
+        }
+        $urls = array($url);
+        if ($mirrors) {
+            foreach ($mirrors as $mirror) {
+                if ($urlType === 'dist') {
+                    $mirrorUrl = ComposerMirror::processUrl($mirror['url'], $this->name, $this->version, $ref, $type);
+                } elseif ($urlType === 'source' && $type === 'git') {
+                    $mirrorUrl = ComposerMirror::processGitUrl($mirror['url'], $this->name, $url, $type);
+                } elseif ($urlType === 'source' && $type === 'hg') {
+                    $mirrorUrl = ComposerMirror::processHgUrl($mirror['url'], $this->name, $url, $type);
+                }
+                if (!in_array($mirrorUrl, $urls)) {
+                    $func = $mirror['preferred'] ? 'array_unshift' : 'array_push';
+                    $func($urls, $mirrorUrl);
+                }
+            }
+        }
+
+        return $urls;
     }
 }
